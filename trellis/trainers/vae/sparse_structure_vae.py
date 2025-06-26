@@ -70,7 +70,9 @@ class SparseStructureVaeTrainer(BasicTrainer):
             a dict with the key "loss" containing a scalar tensor.
             may also contain other keys for different terms.
         """
-        z, mean, logvar = self.training_models['encoder'](ss.float(), sample_posterior=True, return_raw=True)
+        self.training_models['encoder'].eval()
+        with torch.no_grad():
+            z, mean, logvar = self.training_models['encoder'](ss.float(), sample_posterior=True, return_raw=True)
         logits = self.training_models['decoder'](z)
 
         terms = edict(loss = 0.0)
