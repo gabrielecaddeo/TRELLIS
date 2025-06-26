@@ -2,6 +2,7 @@ import importlib
 
 __attributes = {
     'SparseStructure': 'sparse_structure',
+    'SparseStructureSDF': 'sparse_structure_sdf',
     
     'SparseFeat2Render': 'sparse_feat2render',
     'SLat2Render':'structured_latent2render',
@@ -37,6 +38,7 @@ def __getattr__(name):
 # For Pylance
 if __name__ == '__main__':
     from .sparse_structure import SparseStructure
+    from .sparse_structure_sdf import SparseStructureSDF
     
     from .sparse_feat2render import SparseFeat2Render
     from .structured_latent2render import (
