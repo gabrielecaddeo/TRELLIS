@@ -54,6 +54,19 @@ def init_render(engine='CYCLES', resolution=512, geo_mode=False):
         
     bpy.context.preferences.addons['cycles'].preferences.get_devices()
     bpy.context.preferences.addons['cycles'].preferences.compute_device_type = 'CUDA'
+    prefs = bpy.context.preferences.addons['cycles'].preferences
+    prefs.compute_device_type = 'CUDA'
+    prefs.get_devices()
+
+    # Disable all devices first
+    for device in prefs.devices:
+        device.use = False
+
+    # Enable only the first visible CUDA device
+    for device in prefs.devices:
+        if device.type == 'CUDA':
+            device.use = True
+            break
     
 def init_nodes(save_depth=False, save_normal=False, save_albedo=False, save_mist=False):
     if not any([save_depth, save_normal, save_albedo, save_mist]):
@@ -455,6 +468,8 @@ def main(arg):
         "frames": []
     }
     views = json.loads(arg.views)
+    # Force views to NULL
+    views = []
     for i, view in enumerate(views):
         cam.location = (
             view['radius'] * np.cos(view['yaw']) * np.cos(view['pitch']),
@@ -501,8 +516,11 @@ def main(arg):
         unhide_all_objects()
         convert_to_meshes()
         triangulate_meshes()
-        print('[INFO] Meshes triangulated.')
-        
+        print('[INFO] Meshes triangulated.')        
+        with open("/tmp/blender_debug_log.txt", "a") as f:
+            f.write(f"[INFO] Inside mesh to {os.path.join(arg.output_folder, 'mesh.ply')}\n")
+            f.write(f"arg.save_mesh: {arg.save_mesh}\n")
+
         # export ply mesh
         bpy.ops.export_mesh.ply(filepath=os.path.join(arg.output_folder, 'mesh.ply'))
 
