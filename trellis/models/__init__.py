@@ -66,7 +66,9 @@ def from_pretrained(path: str, **kwargs):
         config = json.load(f)
     model = __getattr__(config['name'])(**config['args'], **kwargs)
     model.load_state_dict(load_file(model_file))
-
+    if 'ss_dec_conv3d_16l8_fp16' in path:
+        import torch
+        model.load_state_dict(torch.load('/home/user/TRELLIS/outputs/ss_vae_conv3d_16l8_fp16_1node/ckpts/decoder_ema0.9999_step1000000.pt'))
     return model
 
 
