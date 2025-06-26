@@ -32,10 +32,12 @@ if __name__ == '__main__':
     parser.add_argument('--from_file', action='store_true',
                         help='Build metadata from file instead of from records of processings.' +
                              'Useful when some processing fail to generate records but file already exists.')
+    parser.add_argument('--trust_metadata', action='store_true',
+                    help='Trust metadata.csv and do not check file existence on disk.')
     dataset_utils.add_args(parser)
     opt = parser.parse_args(sys.argv[2:])
     opt = edict(vars(opt))
-
+    opt.trust_metadata = True
     os.makedirs(opt.output_dir, exist_ok=True)
     os.makedirs(os.path.join(opt.output_dir, 'merged_records'), exist_ok=True)
 
@@ -201,11 +203,15 @@ if __name__ == '__main__':
             def worker(sha256):
                 try:
                     if need_process('rendered') and metadata.loc[sha256, 'rendered'] == False and \
-                        os.path.exists(os.path.join(opt.output_dir, 'renders', sha256, 'transforms.json')):
+                        (opt.trust_metadata or os.path.exists(os.path.join(opt.output_dir, 'renders', sha256, 'transforms.json'))):
                         metadata.loc[sha256, 'rendered'] = True
+                    
                     if need_process('voxelized') and metadata.loc[sha256, 'rendered'] == True and metadata.loc[sha256, 'voxelized'] == False and \
                         os.path.exists(os.path.join(opt.output_dir, 'voxels', f'{sha256}.ply')):
                         try:
+                            
+                            # if not opt.trust_metadata:
+                                
                             pts = utils3d.io.read_ply(os.path.join(opt.output_dir, 'voxels', f'{sha256}.ply'))[0]
                             metadata.loc[sha256, 'voxelized'] = True
                             metadata.loc[sha256, 'num_voxels'] = len(pts)
