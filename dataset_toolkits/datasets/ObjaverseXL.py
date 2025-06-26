@@ -45,7 +45,7 @@ def download(metadata, output_dir, **kwargs):
     return pd.DataFrame(downloaded.items(), columns=['sha256', 'local_path'])
 
 
-def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Processing objects') -> pd.DataFrame:
+def foreach_instance(metadata, output_dir, func, max_workers=4, desc='Processing objects') -> pd.DataFrame:
     import os
     from concurrent.futures import ThreadPoolExecutor
     from tqdm import tqdm
