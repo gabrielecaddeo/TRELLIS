@@ -74,6 +74,21 @@ def main(local_rank, cfg):
         name: getattr(models, model.name)(**model.args).cuda()
         for name, model in cfg.models.items()
     }
+        # Load pretrained weights and freeze encoder
+    if 'encoder' in model_dict:
+        encoder = model_dict['encoder']
+
+        from safetensors.torch import load_file
+
+        # Load pretrained weights
+        
+        missing, unexpected = model_dict['encoder'].load_state_dict(load_file("/home/user/.cache/huggingface/hub/models--microsoft--TRELLIS-image-large/snapshots/25e0d31ffbebe4b5a97464dd851910efc3002d96/ckpts/ss_enc_conv3d_16l8_fp16.safetensors"), strict=False)
+        print("Missing keys:", missing)
+        print("Unexpected keys:", unexpected)
+
+        # Freeze all parameters
+        for param in encoder.parameters():
+            param.requires_grad = False
 
     # Model summary
     if rank == 0:
@@ -98,12 +113,12 @@ if __name__ == '__main__':
     # Arguments and config
     parser = argparse.ArgumentParser()
     ## config
-    parser.add_argument('--config', type=str, required=True, help='Experiment config file')
+    parser.add_argument('--config', type=str, default='/home/user/TRELLIS/configs/vae/ss_vae_conv3d_16l8_fp16.json', required=False, help='Experiment config file')
     ## io and resume
-    parser.add_argument('--output_dir', type=str, required=True, help='Output directory')
+    parser.add_argument('--output_dir', default='/home/user/TRELLIS/outputs/ss_vae_conv3d_16l8_fp16_1node', type=str, required=False, help='Output directory')
     parser.add_argument('--load_dir', type=str, default='', help='Load directory, default to output_dir')
     parser.add_argument('--ckpt', type=str, default='latest', help='Checkpoint step to resume training, default to latest')
-    parser.add_argument('--data_dir', type=str, default='./data/', help='Data directory')
+    parser.add_argument('--data_dir', type=str, default='/home/user/TRELLIS/datasets/ObjaverseXL_sketchfab/', help='Data directory')
     parser.add_argument('--auto_retry', type=int, default=3, help='Number of retries on error')
     ## dubug
     parser.add_argument('--tryrun', action='store_true', help='Try run without training')
