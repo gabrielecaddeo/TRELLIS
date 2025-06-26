@@ -1,5 +1,5 @@
 import os
-# os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
+os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
 os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
                                             # 'auto' is faster but will do benchmarking at the beginning.
                                             # Recommended to set to 'native' if run only once.
@@ -14,7 +14,7 @@ pipeline = TrellisImageTo3DPipeline.from_pretrained("microsoft/TRELLIS-image-lar
 pipeline.cuda()
 
 # Load an image
-image = Image.open("assets/example_image/T.png")
+image = Image.open("/home/user/TRELLIS/assets/example_image/T.png")
 
 # Run the pipeline
 outputs = pipeline.run(
