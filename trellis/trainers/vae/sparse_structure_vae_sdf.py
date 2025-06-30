@@ -17,10 +17,11 @@ class EikonalLoss(torch.nn.Module):
         kernel_dz = torch.tensor([[[[0,0,0],[0,0,0],[0,0,0]],[[0,-1,0],[0,0,0],[0,1,0]],[[0,0,0],[0,0,0],[0,0,0]]]], dtype=torch.float32)
         self.spacing = spacing
         # Stack to a single [3, 1, 3, 3, 3] kernel
-        combined_kernel = torch.stack([kernel_dx, kernel_dy, kernel_dz], dim=0).unsqueeze(1)
+        combined_kernel = torch.stack([kernel_dx, kernel_dy, kernel_dz], dim=0)
         # Register the kernel as a buffer. This makes it part of the module's state
         # and handles device placement automatically.
         self.register_buffer('kernel', combined_kernel)
+        
  
     def forward(self, sdf_grid):
         # The kernel is now accessed via self.kernel. It will always be on the
@@ -48,7 +49,7 @@ class CombinedGeometricLoss(torch.nn.Module):
         kernel_dx = torch.tensor([[[[0,0,0],[0,0,0],[0,0,0]],[[0,0,0],[-1,0,1],[0,0,0]],[[0,0,0],[0,0,0],[0,0,0]]]], dtype=torch.float32)
         kernel_dy = torch.tensor([[[[0,0,0],[0,-1,0],[0,0,0]],[[0,0,0],[0,0,0],[0,0,0]],[[0,0,0],[0,1,0],[0,0,0]]]], dtype=torch.float32)
         kernel_dz = torch.tensor([[[[0,0,0],[0,0,0],[0,0,0]],[[0,-1,0],[0,0,0],[0,1,0]],[[0,0,0],[0,0,0],[0,0,0]]]], dtype=torch.float32)
-        combined_kernel = torch.stack([kernel_dx, kernel_dy, kernel_dz], dim=0).unsqueeze(1)
+        combined_kernel = torch.stack([kernel_dx, kernel_dy, kernel_dz], dim=0)
         self.register_buffer('kernel', combined_kernel)
  
     def forward(self, s_pred_grid, s_gt_grid):
@@ -142,14 +143,17 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
         loss_type='bce',
         lambda_kl=1e-6,
         lambda_eikonal=0.1,
+        lambda_normal=0.1,  # Normal consistency loss weight
         **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.loss_type = loss_type
         self.lambda_kl = lambda_kl
         self.lambda_eikonal = lambda_eikonal
+        self.lambda_normal = lambda_normal  # Normal consistency loss weight
         resolution = 64
-        self.eikonal_loss = EikonalLoss(spacing=2/resolution)
+        self.eikonal_loss = EikonalLoss(spacing=2/resolution).to('cuda')
+        self.combined_geometric_loss = CombinedGeometricLoss(spacing=2/resolution).to('cuda')
     
     def training_losses(
         self,
@@ -177,17 +181,23 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
             terms["bce"] = F.binary_cross_entropy_with_logits(logits, ss.float(), reduction='mean')
             terms["loss"] = terms["loss"] + terms["bce"]
         elif self.loss_type == 'eikonal':
+            sdf = sdf.unsqueeze(1)  # Ensure sdf is [N, 1, H, W, D]
             terms["l1"] = F.l1_loss(logits, sdf, reduction='mean')
             terms["eikonal"] = self.eikonal_loss(logits)
             terms["loss"] = terms["loss"] + terms["l1"] + terms["eikonal"] * self.lambda_eikonal
+        elif self.loss_type == 'geometric':
+            sdf = sdf.unsqueeze(1)  # Ensure sdf is [N, 1, H, W, D]
+            terms["l1"] = F.l1_loss(logits, sdf, reduction='mean')
+            terms["eikonal"], terms['normal'] = self.combined_geometric_loss(logits, sdf)
+            terms["loss"] = terms["loss"] + terms["l1"] + terms["eikonal"] * self.lambda_eikonal + terms['normal']*self.lambda_normal
         elif self.loss_type == 'dice':
             logits = F.sigmoid(logits)
             terms["dice"] = 1 - (2 * (logits * ss.float()).sum() + 1) / (logits.sum() + ss.float().sum() + 1)
             terms["loss"] = terms["loss"] + terms["dice"]
         else:
             raise ValueError(f'Invalid loss type {self.loss_type}')
-        terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
-        terms["loss"] = terms["loss"] + self.lambda_kl * terms["kl"]
+        # terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
+        # terms["loss"] = terms["loss"] + self.lambda_kl * terms["kl"]
             
         return terms, {}
     
