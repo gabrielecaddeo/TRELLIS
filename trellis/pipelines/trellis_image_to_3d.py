@@ -188,6 +188,44 @@ class TrellisImageTo3DPipeline(Pipeline):
         
         # Decode occupancy latent
         decoder = self.models['sparse_structure_decoder']
+        coords = torch.argwhere(decoder(z_s)<=0)[:, [0, 2, 3, 4]].int()
+
+        return coords
+    
+
+    def sample_sparse_structure_optimization(
+        self,
+        noise: torch.Tensor,
+        cond: dict,
+        sampler_params: dict = {},
+    ) -> torch.Tensor:
+        """
+        Sample sparse structures with the given conditioning.
+        
+        Args:
+            cond (dict): The conditioning information.
+            num_samples (int): The number of samples to generate.
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        # Sample occupancy latent
+        flow_model = self.models['sparse_structure_flow_model']
+        reso = flow_model.resolution
+        decoder = self.models['sparse_structure_decoder']
+        import numpy as np
+        target = torch.tensor(np.load('/home/user/TRELLIS/006_mustard_bottle_small.npy')).to(self.device)
+        sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+        z_s = self.sparse_structure_sampler.sample_optimization(
+            flow_model,
+            noise,
+            decoder, 
+            target,
+            **cond,
+            **sampler_params,
+            verbose=True
+        ).samples
+        
+        # Decode occupancy latent
+        
         coords = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
 
         return coords
@@ -281,6 +319,36 @@ class TrellisImageTo3DPipeline(Pipeline):
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
         slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
+    
+
+    def run_optimization(
+        self,
+        image: Image.Image,
+        noise: torch.Tensor,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+
+        preprocess_image: bool = True,
+    ) -> dict:
+        """
+        Run the pipeline.
+
+        Args:
+            image (Image.Image): The image prompt.
+            num_samples (int): The number of samples to generate.
+            seed (int): The random seed.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            slat_sampler_params (dict): Additional parameters for the structured latent sampler.
+            formats (List[str]): The formats to decode the structured latent to.
+            preprocess_image (bool): Whether to preprocess the image.
+        """
+        if preprocess_image:
+            image = self.preprocess_image(image)
+        cond = self.get_cond([image])
+        torch.manual_seed(seed)
+        coords = self.sample_sparse_structure_optimization(noise, cond, sparse_structure_sampler_params)
+        
+        return coords
 
     @contextmanager
     def inject_sampler_multi_image(
