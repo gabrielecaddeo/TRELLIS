@@ -60,8 +60,9 @@
             "i_save": 10000,
             "loss_type": "geometric",
             "lambda_kl": 0.001,
-            "lambda_eikonal": 0.01,
-            "lambda_normal": 1
+            "lambda_eikonal": 0.001,
+            "lambda_normal": 1,
+            "lambda_l1": 1
         }
     }
 }
