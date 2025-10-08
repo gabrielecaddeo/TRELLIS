@@ -144,11 +144,13 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
         lambda_kl=1e-6,
         lambda_eikonal=0.1,
         lambda_normal=0.1,  # Normal consistency loss weight
+        lambda_l1=10.0,  # L1 loss weight
         **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.loss_type = loss_type
         self.lambda_kl = lambda_kl
+        self.lambda_l1 = lambda_l1  # L1 loss weight
         self.lambda_eikonal = lambda_eikonal
         self.lambda_normal = lambda_normal  # Normal consistency loss weight
         resolution = 64
@@ -187,16 +189,18 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
             terms["loss"] = terms["loss"] + terms["l1"] + terms["eikonal"] * self.lambda_eikonal
         elif self.loss_type == 'geometric':
             sdf = sdf.unsqueeze(1)  # Ensure sdf is [N, 1, H, W, D]
-            terms["l1"] = F.l1_loss(logits, sdf, reduction='mean')
+            terms["l1"] = F.l1_loss(logits, sdf, reduction='mean') * self.lambda_l1
             terms["eikonal"], terms['normal'] = self.combined_geometric_loss(logits, sdf)
-            terms["loss"] = terms["loss"] + terms["l1"] + terms["eikonal"] * self.lambda_eikonal + terms['normal']*self.lambda_normal
+            terms["eikonal"] = terms["eikonal"] * self.lambda_eikonal
+            terms['normal'] = terms['normal']*self.lambda_normal
+            terms["loss"] = terms["loss"] + terms["l1"] +  terms["eikonal"] + terms['normal']
         elif self.loss_type == 'dice':
             logits = F.sigmoid(logits)
             terms["dice"] = 1 - (2 * (logits * ss.float()).sum() + 1) / (logits.sum() + ss.float().sum() + 1)
             terms["loss"] = terms["loss"] + terms["dice"]
         else:
             raise ValueError(f'Invalid loss type {self.loss_type}')
-        # terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
+        #terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
         # terms["loss"] = terms["loss"] + self.lambda_kl * terms["kl"]
             
         return terms, {}
