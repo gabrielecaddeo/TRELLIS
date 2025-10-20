@@ -93,10 +93,10 @@ class BasicTrainer(Trainer):
             }
         else:
             self.training_models = self.models
-
+        import trellis
         # Build master params
         self.model_params = sum(
-            [[p for p in model.parameters() if p.requires_grad] for model in self.models.values()]
+            [[p for p in model.parameters() if p.requires_grad] for model in self.models.values() ] #if not isinstance(model, trellis.models.sparse_structure_vae.SparseStructureEncoder)
         , [])
         if self.fp16_mode == 'amp':
             self.master_params = self.model_params
@@ -119,7 +119,9 @@ class BasicTrainer(Trainer):
             self.optimizer = getattr(torch.optim, self.optimizer_config['name'])(self.master_params, **self.optimizer_config['args'])
         else:
             self.optimizer = globals()[self.optimizer_config['name']](self.master_params, **self.optimizer_config['args'])
-        
+        for group in self.optimizer.param_groups:
+            for param in group['params']:
+                print(param.shape, param.requires_grad)
         # Initalize learning rate scheduler
         if self.lr_scheduler_config is not None:
             if hasattr(torch.optim.lr_scheduler, self.lr_scheduler_config['name']):
@@ -358,12 +360,39 @@ class BasicTrainer(Trainer):
                 with amp_context():
                     loss, status = self.training_losses(**mb_data)
                     l = loss['loss'] / len(data_list)
+                    # print(f"\nStep {self.step}, batch {i+1}/{len(data_list)}, "
+                    #         f"loss_l1: {loss['l1'].item():.5f}, "
+                    #         f"loss_eikonal: {loss['eikonal'].item():.5f}, "
+                    #         f"loss_normal: {loss['normal'].item():.5f}, "
+                    #         f"status: {status}")
+
                 ## backward
                 if self.fp16_mode == 'amp':
                     self.scaler.scale(l).backward()
                 elif self.fp16_mode == 'inflat_all':
-                    scaled_l = l * (2 ** self.log_scale)
-                    scaled_l.backward()
+                    try:
+                        with torch.autograd.set_detect_anomaly(True):
+                            scaled_l = l * (2 ** self.log_scale)
+
+                            scaled_l.backward()
+                            for name, p in self.training_models['decoder'].named_parameters():
+                                if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
+                                    with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
+                                        f.write(f"NaN/Inf in gradient of decoder param: {name} at step {self.step}\n")
+
+                    except Exception as e:
+                        with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
+                            f.write(f"[Step {self.step}] Backward failed with exception:\n{str(e)}\n")
+                            f.write(f"Loss value: {loss.item()}\n")
+                            f.write(f"logvar stats: {status['logvar_min']}, {status['logvar_max']}\n")
+                            f.write(f"mean stats: {status['mean_min']}, {status['mean_max']}\n")
+                        
+                        for name, p in self.training_models['decoder'].named_parameters():
+                                if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
+                                    with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
+                                        f.write(f"NaN/Inf in gradient of decoder param: {name} at step {self.step}\n")
+                            
+                        raise
                 else:
                     l.backward()
             ## log
@@ -395,6 +424,14 @@ class BasicTrainer(Trainer):
                 if self.grad_clip is None:
                     model_grads_to_master_grads(self.model_params, self.master_params)
                     self.master_params[0].grad.mul_(1.0 / (2 ** self.log_scale))
+                # for name, param in self.models.named_parameters():
+                #     if param.requires_grad:
+                #         if param.grad is None:
+                #             print(f"{name}: grad is None")
+                #         else:
+                #             print(f"{name}: param.shape = {param.shape}, grad.shape = {param.grad.shape}")
+                #             if param.shape != param.grad.shape:
+                #                 print(f"⚠️ SHAPE MISMATCH: {name}")
                 self.optimizer.step()
                 master_params_to_model_params(self.model_params, self.master_params)
                 self.log_scale += self.fp16_scale_growth

@@ -106,14 +106,98 @@ class TrellisImageTo3DPipeline(Pipeline):
         bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
         center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
         size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
-        size = int(size * 1.2)
+        size_old = size
+        size = int(size * 1.5)
+        
         bbox = center[0] - size // 2, center[1] - size // 2, center[0] + size // 2, center[1] + size // 2
+
+        # Asymmetric padding: more padding on the right, less on the left
+        # left_padding = 0  # Align object to the left
+        # right_padding = size * 2  # Give much more padding on the right
+        
+        # # Adjust the bounding box: align object to the left
+        # bbox = (bbox[0] - left_padding, bbox[1] - size // 2, bbox[0] + size + right_padding, bbox[3] + size // 2)
+        
+        # # Make sure the new bbox stays within the image bounds
+        # bbox = (max(bbox[0], 0), max(bbox[1], 0), min(bbox[2], output.width), min(bbox[3], output.height))
+    
+        
         output = output.crop(bbox)  # type: ignore
         output = output.resize((518, 518), Image.Resampling.LANCZOS)
         output = np.array(output).astype(np.float32) / 255
         output = output[:, :, :3] * output[:, :, 3:4]
         output = Image.fromarray((output * 255).astype(np.uint8))
+        output.save("/home/user/TRELLIS/bb.png")
         return output
+    
+    def preprocess_image2(self, input: Image.Image) -> Image.Image:
+        """
+        Preprocess the input image with asymmetric padding.
+        The object will be aligned to the left or right side of the bounding box with more padding on one side.
+        """
+        # if has alpha channel, use it directly; otherwise, remove background
+        has_alpha = False
+        if input.mode == 'RGBA':
+            alpha = np.array(input)[:, :, 3]
+            if not np.all(alpha == 255):
+                has_alpha = True
+        if has_alpha:
+            output = input
+        else:
+            input = input.convert('RGB')
+            max_size = max(input.size)
+            scale = min(1, 1024 / max_size)
+            if scale < 1:
+                input = input.resize((int(input.width * scale), int(input.height * scale)), Image.Resampling.LANCZOS)
+            if getattr(self, 'rembg_session', None) is None:
+                self.rembg_session = rembg.new_session('u2net')
+            output = rembg.remove(input, session=self.rembg_session)
+        
+        output_np = np.array(output)
+        alpha = output_np[:, :, 3]
+        bbox = np.argwhere(alpha > 0.8 * 255)
+        bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
+        center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+        size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
+        size = int(size * 1.2)
+        
+        # Asymmetric padding: more padding on the right or left
+        left_padding = size // 5  # Adjust for asymmetric padding (smaller padding on left)
+        right_padding = size * 2  # Much larger padding on the right
+        
+        # Adjust the bounding box with asymmetric padding
+        bbox = (bbox[0] - left_padding, bbox[1] - size // 2, 
+                bbox[0] + size + right_padding, bbox[3] + size // 2)
+        
+        # Make sure the new bbox stays within the image bounds
+        bbox = (max(bbox[0], 0), max(bbox[1], 0), min(bbox[2], output.width), min(bbox[3], output.height))
+        
+        # Crop the image
+        output = output.crop(bbox)  # type: ignore
+        
+        # Now resize to a fixed size while keeping the aspect ratio
+        aspect_ratio = output.width / output.height
+        target_size = 518
+        if output.width > output.height:
+            new_width = target_size
+            new_height = int(target_size / aspect_ratio)
+        else:
+            new_height = target_size
+            new_width = int(target_size * aspect_ratio)
+        
+        # Resize without distorting the aspect ratio
+        output = output.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # If necessary, pad to make it exactly 518x518 while maintaining the image centered
+        padded_image = Image.new('RGB', (518, 518), (0, 0, 0))
+        offset_x = (518 - new_width) // 2
+        offset_y = (518 - new_height) // 2
+        padded_image.paste(output, (offset_x, offset_y))
+        
+        padded_image.save("/home/user/TRELLIS/bb_asym.png")
+        return padded_image
+
+
 
     @torch.no_grad()
     def encode_image(self, image: Union[torch.Tensor, list[Image.Image]]) -> torch.Tensor:
@@ -188,15 +272,19 @@ class TrellisImageTo3DPipeline(Pipeline):
         
         # Decode occupancy latent
         decoder = self.models['sparse_structure_decoder']
+        # for i in range(len(z_s.pred_x_t)): # to decomment this, remover .samples from z_s
+        #     torch.save(torch.argwhere(decoder(z_s.pred_x_t[i])<=0)[:, [0, 2, 3, 4]].int(), f"/home/user/TRELLIS/coords_asym/00000{i}.pt")
+        # # exit(0)
         coords = torch.argwhere(decoder(z_s)<=0)[:, [0, 2, 3, 4]].int()
-
+        # for i in range(coords.shape[0]):
+        #     pred_x_t
         return coords
-    
 
-    def sample_sparse_structure_optimization(
+    def sample_sparse_structure_velocity(
         self,
-        noise: torch.Tensor,
         cond: dict,
+        sdf: torch.Tensor,
+        num_samples: int = 1,
         sampler_params: dict = {},
     ) -> torch.Tensor:
         """
@@ -210,25 +298,73 @@ class TrellisImageTo3DPipeline(Pipeline):
         # Sample occupancy latent
         flow_model = self.models['sparse_structure_flow_model']
         reso = flow_model.resolution
+        # Decode occupancy latent
         decoder = self.models['sparse_structure_decoder']
-        import numpy as np
-        target = torch.tensor(np.load('/home/user/TRELLIS/006_mustard_bottle_small.npy')).to(self.device)
+        noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
-        z_s = self.sparse_structure_sampler.sample_optimization(
+        print(type(sdf))
+        print(type(decoder))
+        z_s = self.sparse_structure_sampler.sample_velocity(
+            flow_model,
+            noise,
+            decoder,
+            sdf,
+            **cond,
+            **sampler_params,
+            verbose=True
+        )
+        
+        
+        for i in range(len(z_s.pred_x_t)): # to decomment this, remover .samples from z_s
+            torch.save(torch.argwhere(decoder(z_s.pred_x_t[i])<=0)[:, [0, 2, 3, 4]].int(), f"/home/user/TRELLIS/coords_asym_velocity/00000{i}.pt")
+        exit(0)
+        coords = torch.argwhere(decoder(z_s)<=0)[:, [0, 2, 3, 4]].int()
+        # for i in range(coords.shape[0]):
+        #     pred_x_t
+        return coords
+
+    def sample_sparse_structure_optimization(
+        self,
+        noise: torch.Tensor,
+        cond: dict,
+        target: torch.Tensor,
+        sampler_params: dict = {},
+    ) -> torch.Tensor:
+        """
+        Sample sparse structures with the given conditioning.
+        
+        Args:
+            cond (dict): The conditioning information.
+            num_samples (int): The number of samples to generate.
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        # Sample occupancy latent
+        flow_model = self.models['sparse_structure_flow_model']
+        decoder = self.models['sparse_structure_decoder']
+        
+        # Combine default and user-provided sampler parameters
+        full_sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+        
+        # Run the optimization using the currently configured sampler
+        optimization_result = self.sparse_structure_sampler.sample_optimization(
             flow_model,
             noise,
             decoder, 
             target,
             **cond,
-            **sampler_params,
+            **full_sampler_params,
             verbose=True
-        ).samples
+        )
         
-        # Decode occupancy latent
+        # BUG FIX: The sampler now returns a dictionary containing the final SDF.
+        # We use this SDF to compute the coordinates. This was a point of failure.
+        final_sdf = optimization_result.final_sdf
+        coords = torch.argwhere(final_sdf <= 0)[:, [0, 2, 3, 4]].int()
         
-        coords = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
-
-        return coords
+        # Add coords to the result object to be used in the next pipeline stage
+        optimization_result.coords = coords
+        
+        return optimization_result
 
     def decode_slat(
         self,
@@ -313,21 +449,23 @@ class TrellisImageTo3DPipeline(Pipeline):
             preprocess_image (bool): Whether to preprocess the image.
         """
         if preprocess_image:
-            image = self.preprocess_image(image)
+            image = self.preprocess_image2(image)
         cond = self.get_cond([image])
         torch.manual_seed(seed)
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
         slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
     
-
-    def run_optimization(
+    
+    def run_velocity(
         self,
         image: Image.Image,
-        noise: torch.Tensor,
+        target: torch.Tensor,
+        num_samples: int = 1,
         seed: int = 42,
         sparse_structure_sampler_params: dict = {},
-
+        slat_sampler_params: dict = {},
+        formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
         preprocess_image: bool = True,
     ) -> dict:
         """
@@ -343,12 +481,100 @@ class TrellisImageTo3DPipeline(Pipeline):
             preprocess_image (bool): Whether to preprocess the image.
         """
         if preprocess_image:
+            image = self.preprocess_image2(image)
+        cond = self.get_cond([image])
+        torch.manual_seed(seed)
+        coords = self.sample_sparse_structure_velocity(cond, target, num_samples, sparse_structure_sampler_params)
+        slat = self.sample_slat(cond, coords, slat_sampler_params)
+        return self.decode_slat(slat, formats)
+    
+    ##############################
+    ##---- Lolli's Stuff
+    ##############################
+
+    @contextmanager
+    def _override_sampler(self, guidance_config: dict):
+        """
+        A context manager to temporarily replace the sparse structure sampler.
+        This allows for dynamically choosing an optimization strategy at runtime.
+        """
+        original_sampler = self.sparse_structure_sampler
+        try:
+            config = guidance_config.copy()
+            sampler_name = config.pop('name', None)
+            if not sampler_name:
+                raise ValueError("guidance_config must include a 'name' key specifying the sampler class.")
+            
+            print(f"INFO: Temporarily injecting '{sampler_name}' with config: {config}")
+            sampler_class = getattr(samplers, sampler_name)
+            
+            # Get base arguments (like sigma_min) for the sampler
+            base_args = self._pretrained_args['sparse_structure_sampler']['args']
+            
+            # Instantiate the new sampler
+            self.sparse_structure_sampler = sampler_class(**base_args, **config)
+            yield
+        finally:
+            print("INFO: Restoring original sampler.")
+            self.sparse_structure_sampler = original_sampler
+
+    # Also includes the choice of sampler
+    def run_optimization(
+        self,
+        image: Image.Image,
+        noise: torch.Tensor,
+        constraint_sdf: torch.Tensor,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {},
+        formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
+        preprocess_image: bool = True,
+    ) -> dict:
+        """
+        Run the guidance optimization pipeline. Also gives the mesh/gaussian/radiance_field (?).
+
+        This version allows for dynamically selecting the guidance sampler to use,
+        enabling easy comparison between different strategies like D-Flow and OC-Flow.
+
+        Args:
+            image (Image.Image): The image prompt.
+            num_samples (int): The number of samples to generate.
+            constraint_sdf (): Constraint sdf.
+            seed (int): The random seed.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            slat_sampler_params (dict): Additional parameters for the structured latent sampler.
+            formats (List[str]): The formats to decode the structured latent to.
+            preprocess_image (bool): Whether to preprocess the image.
+            guidance_sampler (str, optional): The name of the sampler class to use for
+                                              optimization (e.g., 'OCFlowAdaptiveSampler',
+                                              'FlowMidpointSampler'). If None, uses the
+                                              default sampler.
+        """
+            
+        params_copy = sparse_structure_sampler_params.copy()
+        
+        # Extract guidance-specific configuration from the sampler parameters
+        guidance_config = params_copy.pop('guidance_config', None)
+        
+        target = constraint_sdf.to(self.device)
+            
+        if preprocess_image:
             image = self.preprocess_image(image)
         cond = self.get_cond([image])
         torch.manual_seed(seed)
-        coords = self.sample_sparse_structure_optimization(noise, cond, sparse_structure_sampler_params)
+
+        if guidance_config:
+            with self._override_sampler(guidance_config):
+                opt_results = self.sample_sparse_structure_optimization(noise, cond, target, params_copy)
+        else:
+            print("WARNING: No 'guidance_config' provided. Using default sampler for optimization.")
+            opt_results = self.sample_sparse_structure_optimization(noise, cond, target, params_copy)
         
-        return coords
+        coords = opt_results.coords
+        slat = self.sample_slat(cond, coords, slat_sampler_params)
+        final_outputs = self.decode_slat(slat, formats)
+
+        return final_outputs
 
     @contextmanager
     def inject_sampler_multi_image(

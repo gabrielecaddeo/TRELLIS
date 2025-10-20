@@ -9,7 +9,7 @@ import utils3d
 from .components import StandardDatasetBase
 from ..representations.octree import DfsOctree as Octree
 from ..renderers import OctreeRenderer
-
+import random
 
 class SparseStructureSDF(StandardDatasetBase):
     """
@@ -46,13 +46,15 @@ class SparseStructureSDF(StandardDatasetBase):
         ss = torch.zeros(1, self.resolution, self.resolution, self.resolution, dtype=torch.long)
         ss[:, coords[:, 0], coords[:, 1], coords[:, 2]] = 1
 
-        sdf = torch.tensor(np.load(os.path.join(root, 'sdfs', f'{instance}.npy')), dtype=torch.float32)
-        
-        return {'ss': ss, 'sdf': sdf}
+        random_number = random.randint(0, 23)
+        sdf = torch.tensor(np.load(os.path.join(root, 'data', instance, 'sdfs', f'{instance}_f{random_number:03d}.npy')), dtype=torch.float32)
+        sdf = torch.clamp(sdf, -2, 2)
+        sdf = sdf.unsqueeze(0)
+        return {'ss': ss, 'sdf': sdf, 'instance': instance}
 
     @torch.no_grad()
     def visualize_sample(self, ss: Union[torch.Tensor, dict]):
-        ss = ss if isinstance(ss, torch.Tensor) else ss['ss']
+        ss = ss if isinstance(ss, torch.Tensor) else ss['sdf']
         
         renderer = OctreeRenderer()
         renderer.rendering_options.resolution = 512
@@ -95,7 +97,9 @@ class SparseStructureSDF(StandardDatasetBase):
                 sh_degree=0,
                 primitive_config={'solid': True},
             )
-            coords = torch.nonzero(ss[i, 0], as_tuple=False)
+            mask = ss[i, 0] <= 0
+            #coords = torch.nonzero(ss[i, 0], as_tuple=False)
+            coords = torch.nonzero(mask, as_tuple=False)
             representation.position = coords.float() / self.resolution
             representation.depth = torch.full((representation.position.shape[0], 1), int(np.log2(self.resolution)), dtype=torch.uint8, device='cuda')
 
