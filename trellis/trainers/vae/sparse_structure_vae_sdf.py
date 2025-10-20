@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from easydict import EasyDict as edict
 
 from ..basic import BasicTrainer
-
+import os
 
 class EikonalLoss(torch.nn.Module):
     def __init__(self, spacing=1.0):
@@ -51,54 +51,72 @@ class CombinedGeometricLoss(torch.nn.Module):
         kernel_dz = torch.tensor([[[[0,0,0],[0,0,0],[0,0,0]],[[0,-1,0],[0,0,0],[0,1,0]],[[0,0,0],[0,0,0],[0,0,0]]]], dtype=torch.float32)
         combined_kernel = torch.stack([kernel_dx, kernel_dy, kernel_dz], dim=0)
         self.register_buffer('kernel', combined_kernel)
- 
+        self.kernel.to('cuda')
+
     def forward(self, s_pred_grid, s_gt_grid):
         # --- 1. Reusable Gradient Calculation ---
         # The denominator in the central difference formula is (2 * h)
         denominator = 2.0 * self.spacing
-        # Calculate gradients for both predicted and ground truth grids
-        pred_gradients = F.conv3d(s_pred_grid, self.kernel, padding=1) / denominator
-        gt_gradients = F.conv3d(s_gt_grid, self.kernel, padding=1) / denominator
-        # --- 2. Eikonal Loss Calculation ---
-        pred_gradient_norm = torch.norm(pred_gradients, p=2, dim=1) # Norm is now [B, D, H, W]
-        # The per-voxel loss before taking the mean
-        eikonal_per_voxel_loss = (pred_gradient_norm - 1.0) ** 2
-        # --- 3. Normal Consistency Loss Calculation ---
-        # Create a mask for the narrow band around the surface
-        surface_mask = torch.abs(s_gt_grid.squeeze(1)) < (2 * self.spacing) # Mask is [B, D, H, W]
-        # Normalize the gradient vectors to get normals. Add epsilon for stability.
-        # Note: We reuse pred_gradient_norm here.
-        pred_normals = pred_gradients / (pred_gradient_norm.unsqueeze(1) + 1e-8)
-        gt_normals = gt_gradients / (torch.norm(gt_gradients, p=2, dim=1, keepdim=True) + 1e-8)
-        # Cosine similarity is the dot product of the unit vectors
-        # We need to sum along the channel dimension (dim=1)
-        cos_sim = torch.sum(pred_normals * gt_normals, dim=1) # Result is [B, D, H, W]
-        # The per-voxel loss before taking the mean
-        normal_per_voxel_loss = 1.0 - cos_sim
- 
-        # --- 4. Optional Stochastic Subsampling ---
-        if self.num_samples is not None and self.num_samples < s_pred_grid.numel():
-            # Generate random indices once and reuse for all losses
-            num_voxels = s_pred_grid.numel()
-            indices = torch.randint(0, num_voxels, (self.num_samples,), device=s_pred_grid.device)
-            # Sample the per-voxel losses using the same indices
-            eikonal_loss = eikonal_per_voxel_loss.view(-1)[indices].mean()
- 
-            # For normal loss, we only sample from the surface region for efficiency
-            masked_normal_loss = torch.masked_select(normal_per_voxel_loss, surface_mask)
-            if masked_normal_loss.numel() > 0:
-                # To keep it simple, if the number of surface points is large enough, we sample from it.
-                # A more complex strategy could be used if needed.
-                num_surface_samples = min(self.num_samples, masked_normal_loss.numel())
-                surf_indices = torch.randint(0, masked_normal_loss.numel(), (num_surface_samples,), device=s_pred_grid.device)
-                normal_loss = masked_normal_loss[surf_indices].mean()
+        with torch.amp.autocast('cuda', enabled=False):
+            # Calculate gradients for both predicted and ground truth grids
+            pred_gradients = F.conv3d(s_pred_grid, self.kernel, padding=1) / denominator
+            gt_gradients = F.conv3d(s_gt_grid, self.kernel, padding=1) / denominator
+
+            # --- 2. Eikonal Loss Calculation ---
+            pred_gradient_norm = torch.norm(pred_gradients, p=2, dim=1) # Norm is now [B, D, H, W]
+            # Add clamp
+            pred_gradient_norm = torch.clamp(pred_gradient_norm, min=1e-4, max=10.0)
+            eikonal_per_voxel_loss = (pred_gradient_norm - 1.0) ** 2
+            # --- 3. Normal Consistency Loss Calculation ---
+            # Create a mask for the narrow band around the surface
+            surface_mask = torch.abs(s_gt_grid.squeeze(1)) < (2 * self.spacing) # Mask is [B, D, H, W]
+            # Add clamp
+            gt_grad_norm = torch.norm(gt_gradients, p=2, dim=1, keepdim=True)
+            gt_grad_norm = torch.clamp(gt_grad_norm, min=1e-4, max=10.0)
+            # Normalize the gradient vectors to get normals. Add epsilon for stability.
+            # Note: We reuse pred_gradient_norm here.
+            pred_normals = pred_gradients / (pred_gradient_norm.unsqueeze(1) + 1e-8)
+            gt_normals = gt_gradients /gt_grad_norm #(torch.norm(gt_gradients, p=2, dim=1, keepdim=True) + 1e-8)
+            # Cosine similarity is the dot product of the unit vectors
+            # We need to sum along the channel dimension (dim=1)
+            cos_sim = torch.sum(pred_normals * gt_normals, dim=1) # Result is [B, D, H, W]
+            # The per-voxel loss before taking the mean
+            normal_per_voxel_loss = 1.0 - cos_sim
+            
+            # --- 4. Optional Stochastic Subsampling ---
+            if self.num_samples is not None and self.num_samples < s_pred_grid.numel():
+                # Generate random indices once and reuse for all losses
+                num_voxels = s_pred_grid.numel()
+                indices = torch.randint(0, num_voxels, (self.num_samples,), device=s_pred_grid.device)
+                # Sample the per-voxel losses using the same indices
+                eikonal_loss = eikonal_per_voxel_loss.view(-1)[indices].mean()
+    
+                # For normal loss, we only sample from the surface region for efficiency
+                masked_normal_loss = torch.masked_select(normal_per_voxel_loss, surface_mask)
+                if masked_normal_loss.numel() > 0:
+                    # To keep it simple, if the number of surface points is large enough, we sample from it.
+                    # A more complex strategy could be used if needed.
+                    num_surface_samples = min(self.num_samples, masked_normal_loss.numel())
+                    surf_indices = torch.randint(0, masked_normal_loss.numel(), (num_surface_samples,), device=s_pred_grid.device)
+                    normal_loss = masked_normal_loss[surf_indices].mean()
+                else:
+                    normal_loss = torch.tensor(0.0, device=s_pred_grid.device) # No surface points found
             else:
-                normal_loss = torch.tensor(0.0, device=s_pred_grid.device) # No surface points found
-        else:
-            # --- 5. Full Grid Loss Calculation ---
-            eikonal_loss = eikonal_per_voxel_loss.mean()
-            normal_loss = torch.masked_select(normal_per_voxel_loss, surface_mask).mean()
- 
+                # --- 5. Full Grid Loss Calculation ---
+                eikonal_loss = eikonal_per_voxel_loss.mean()
+                normal_loss = torch.masked_select(normal_per_voxel_loss, surface_mask).mean()
+
+        if torch.isnan(pred_gradients).any():
+            print("⚠️ NaN in pred_gradients")
+        if torch.isnan(pred_gradient_norm).any():
+            print("⚠️ NaN in pred_gradient_norm")
+        if torch.isnan(eikonal_per_voxel_loss).any():
+            print("⚠️ NaN in eikonal loss")
+        if torch.isnan(normal_per_voxel_loss).any():
+            print("⚠️ NaN in normal loss")
+        print(f"grad_norm range: [{pred_gradient_norm.min().item():.3f}, {pred_gradient_norm.max().item():.3f}]")
+        print(f"logits range: [{s_pred_grid.min().item():.3f}, {s_pred_grid.max().item():.3f}]")
+        # logits_range = (s_pred_grid.min().item(), s_pred_grid.max().item())
         return eikonal_loss, normal_loss
     
 class SparseStructureVaeSDFTrainer(BasicTrainer):
@@ -161,6 +179,7 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
         self,
         ss: torch.Tensor,
         sdf: torch.Tensor,
+        instance: str,
         **kwargs
     ) -> Tuple[Dict, Dict]:
         """
@@ -173,11 +192,22 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
             a dict with the key "loss" containing a scalar tensor.
             may also contain other keys for different terms.
         """
-        self.training_models['encoder'].eval()
-        with torch.no_grad():
-            z, mean, logvar = self.training_models['encoder'](ss.float(), sample_posterior=True, return_raw=True)
+        # self.training_models['encoder'].eval()
+        # with torch.no_grad():
+        for name, p in self.training_models['encoder'].named_parameters():
+            if torch.isnan(p).any() or torch.isinf(p).any():
+                with open(os.path.join(self.output_dir,"nan_debug.log"), "a") as f:
+                    f.write(f"Parameter {name} of encoder has NaNs or Infs! Step {self.step}")
+        for name, p in self.training_models['decoder'].named_parameters():
+            if torch.isnan(p).any() or torch.isinf(p).any():
+                with open(os.path.join(self.output_dir,"nan_debug.log"), "a") as f:
+                    f.write(f"Parameter {name} of decoder has NaNs or Infs! Step {self.step}")
+        z, mean, logvar = self.training_models['encoder'](sdf.float(), sample_posterior=True, return_raw=True)
         logits = self.training_models['decoder'](z)
-
+        if not torch.isfinite(logits).all():
+            print(f"NaNs in logits before loss. Aborting step {self.step}.")
+            return {"loss": torch.tensor(float('nan'), device=logits.device)}, {}
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=1e6, neginf=-1e6)
         terms = edict(loss = 0.0)
         if self.loss_type == 'bce':
             terms["bce"] = F.binary_cross_entropy_with_logits(logits, ss.float(), reduction='mean')
@@ -188,9 +218,9 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
             terms["eikonal"] = self.eikonal_loss(logits)
             terms["loss"] = terms["loss"] + terms["l1"] + terms["eikonal"] * self.lambda_eikonal
         elif self.loss_type == 'geometric':
-            sdf = sdf.unsqueeze(1)  # Ensure sdf is [N, 1, H, W, D]
+            # sdf = sdf.unsqueeze(1)  # Ensure sdf is [N, 1, H, W, D]
             terms["l1"] = F.l1_loss(logits, sdf, reduction='mean') * self.lambda_l1
-            terms["eikonal"], terms['normal'] = self.combined_geometric_loss(logits, sdf)
+            terms["eikonal"], terms['normal']= self.combined_geometric_loss(logits, sdf)
             terms["eikonal"] = terms["eikonal"] * self.lambda_eikonal
             terms['normal'] = terms['normal']*self.lambda_normal
             terms["loss"] = terms["loss"] + terms["l1"] +  terms["eikonal"] + terms['normal']
@@ -200,10 +230,17 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
             terms["loss"] = terms["loss"] + terms["dice"]
         else:
             raise ValueError(f'Invalid loss type {self.loss_type}')
-        #terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
-        # terms["loss"] = terms["loss"] + self.lambda_kl * terms["kl"]
-            
-        return terms, {}
+        terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
+        terms["loss"] = terms["loss"] + self.lambda_kl * terms["kl"]
+        # print(f"[Step {self.step}] NaN detected! Instance: {' '.join(instance)}\n")
+        if not torch.isfinite(terms["loss"]):
+            with open(os.path.join(self.output_dir,"nan_debug.log", "a") as f:
+                f.write(f"[Step {self.step}] NaN detected! Instance: {' '.join(instance)}\n")
+                f.write(f"  l1: {terms['l1']}, eikonal: {terms['eikonal']}, normal: {terms.get('normal', 'n/a')}\n")
+                f.write(f"  logits max: {logits.max().item()}, min: {logits.min().item()}\n")
+                f.write(f"logvar stats: {logvar.min().item()}, {logvar.max().item()}")
+                f.write(f"mean stats: {mean.min().item()}, {mean.max().item()}")
+        return terms, {"logvar_min": logvar.min().item(), "logvar_min": logvar.min().item(),"mean_min": mean.min().item(), "mean_min": mean.min().item(),}
     
     @torch.no_grad()
     def snapshot(self, suffix=None, num_samples=64, batch_size=1, verbose=False):
@@ -231,11 +268,11 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
             batch = min(batch_size, num_samples - i)
             data = next(iter(dataloader))
             args = {k: v[:batch].cuda() if isinstance(v, torch.Tensor) else v[:batch] for k, v in data.items()}
-            z = self.models['encoder'](args['ss'].float(), sample_posterior=False)
+            z = self.models['encoder'](args['sdf'].float(), sample_posterior=False)
             logits = self.models['decoder'](z)
-            recon = (logits <= 0).long()
-            gts.append(args['ss'])
-            recons.append(recon)
+            #recon = (logits <= 0).long()
+            gts.append(args['sdf'])
+            recons.append(logits)
 
         sample_dict = {
             'gt': {'value': torch.cat(gts, dim=0), 'type': 'sample'},
