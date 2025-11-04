@@ -197,6 +197,8 @@ class SparseStructureEncoder(nn.Module):
         mean, logvar = h.chunk(2, dim=1)
 
         if sample_posterior:
+            print(f"logvar: {logvar.max()}, {logvar.min()}")
+            logvar = torch.clamp(logvar, min=-10, max=10)
             std = torch.exp(0.5 * logvar)
             z = mean + std * torch.randn_like(std)
         else:
