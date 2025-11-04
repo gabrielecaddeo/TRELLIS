@@ -104,7 +104,7 @@ class BasicTrainer(Trainer):
         elif self.fp16_mode == 'inflat_all':
             self.master_params = make_master_params(self.model_params)
             self.fp16_scale_growth = self.fp16_scale_growth
-            self.log_scale = 20.0
+            self.log_scale = 12.0
         elif self.fp16_mode is None:
             self.master_params = self.model_params
         else:
@@ -358,8 +358,10 @@ class BasicTrainer(Trainer):
             sync_contexts = [self.training_models[name].no_sync for name in self.training_models] if i != len(data_list) - 1 and self.world_size > 1 else [nullcontext]
             with nested_contexts(*sync_contexts), elastic_controller_context():
                 with amp_context():
+                    
                     loss, status = self.training_losses(**mb_data)
                     l = loss['loss'] / len(data_list)
+
                     # print(f"\nStep {self.step}, batch {i+1}/{len(data_list)}, "
                     #         f"loss_l1: {loss['l1'].item():.5f}, "
                     #         f"loss_eikonal: {loss['eikonal'].item():.5f}, "
@@ -371,14 +373,13 @@ class BasicTrainer(Trainer):
                     self.scaler.scale(l).backward()
                 elif self.fp16_mode == 'inflat_all':
                     try:
-                        with torch.autograd.set_detect_anomaly(True):
-                            scaled_l = l * (2 ** self.log_scale)
+                        scaled_l = l * (2 ** self.log_scale)
 
-                            scaled_l.backward()
-                            for name, p in self.training_models['decoder'].named_parameters():
-                                if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
-                                    with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
-                                        f.write(f"NaN/Inf in gradient of decoder param: {name} at step {self.step}\n")
+                        scaled_l.backward()
+                        for name, p in self.training_models['decoder'].named_parameters():
+                            if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
+                                with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
+                                    f.write(f"NaN/Inf in gradient of denoiser param: {name} at step {self.step}\n")
 
                     except Exception as e:
                         with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
@@ -386,12 +387,11 @@ class BasicTrainer(Trainer):
                             f.write(f"Loss value: {loss.item()}\n")
                             f.write(f"logvar stats: {status['logvar_min']}, {status['logvar_max']}\n")
                             f.write(f"mean stats: {status['mean_min']}, {status['mean_max']}\n")
+                        # for name, p in self.training_models['denoiser'].named_parameters():
+                        #         if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
+                        #             with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
+                        #                 f.write(f"NaN/Inf in gradient of decoder param: {name} at step {self.step}\n")
                         
-                        for name, p in self.training_models['decoder'].named_parameters():
-                                if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
-                                    with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
-                                        f.write(f"NaN/Inf in gradient of decoder param: {name} at step {self.step}\n")
-                            
                         raise
                 else:
                     l.backward()
@@ -435,6 +435,7 @@ class BasicTrainer(Trainer):
                 self.optimizer.step()
                 master_params_to_model_params(self.model_params, self.master_params)
                 self.log_scale += self.fp16_scale_growth
+                self.log_scale = min(self.log_scale, 18.0)
             else:
                 self.log_scale -= 1
         else:
