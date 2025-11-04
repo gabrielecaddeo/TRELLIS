@@ -9,8 +9,10 @@ __attributes = {
     'Slat2RenderGeo':'structured_latent2render',
     
     'SparseStructureLatent': 'sparse_structure_latent',
+    'SparseStructureLatentSDF': 'sparse_structure_latent',
     'TextConditionedSparseStructureLatent': 'sparse_structure_latent',
     'ImageConditionedSparseStructureLatent': 'sparse_structure_latent',
+    'ImageConditionedSparseStructureLatentSDF': 'sparse_structure_latent',
     
     'SLat': 'structured_latent',
     'TextConditionedSLat': 'structured_latent',
@@ -48,8 +50,10 @@ if __name__ == '__main__':
     
     from .sparse_structure_latent import (
         SparseStructureLatent,
+        SparseStructureLatentSDF,
         TextConditionedSparseStructureLatent,
         ImageConditionedSparseStructureLatent,
+        ImageConditionedSparseStructureLatentSDF,
     )
     
     from .structured_latent import (
