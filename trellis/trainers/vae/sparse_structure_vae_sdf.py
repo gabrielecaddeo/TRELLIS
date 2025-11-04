@@ -79,9 +79,10 @@ class CombinedGeometricLoss(torch.nn.Module):
             gt_normals = gt_gradients /gt_grad_norm #(torch.norm(gt_gradients, p=2, dim=1, keepdim=True) + 1e-8)
             # Cosine similarity is the dot product of the unit vectors
             # We need to sum along the channel dimension (dim=1)
-            cos_sim = torch.sum(pred_normals * gt_normals, dim=1) # Result is [B, D, H, W]
-            # The per-voxel loss before taking the mean
-            normal_per_voxel_loss = 1.0 - cos_sim
+            cos_sim = torch.sum(pred_normals * gt_normals, dim=1)  # [B, D, H, W]
+            cos_sim = torch.clamp(cos_sim, min=-1.0 + 1e-4, max=1.0 - 1e-4)
+            normal_per_voxel_loss = 1.0 - cos_sim # Result is [B, D, H, W]
+
             
             # --- 4. Optional Stochastic Subsampling ---
             if self.num_samples is not None and self.num_samples < s_pred_grid.numel():
@@ -114,6 +115,9 @@ class CombinedGeometricLoss(torch.nn.Module):
             print("⚠️ NaN in eikonal loss")
         if torch.isnan(normal_per_voxel_loss).any():
             print("⚠️ NaN in normal loss")
+        print(f"s_pred_grid stats: min={s_pred_grid.min().item():.3f}, max={s_pred_grid.max().item():.3f}, mean={s_pred_grid.mean().item():.3f}, std={s_pred_grid.std().item():.3f}")
+        print(f"grad_norm percentiles: p99={pred_gradient_norm.quantile(0.99).item():.2f}, p999={pred_gradient_norm.quantile(0.999).item():.2f}")
+
         print(f"grad_norm range: [{pred_gradient_norm.min().item():.3f}, {pred_gradient_norm.max().item():.3f}]")
         print(f"logits range: [{s_pred_grid.min().item():.3f}, {s_pred_grid.max().item():.3f}]")
         # logits_range = (s_pred_grid.min().item(), s_pred_grid.max().item())
@@ -174,6 +178,9 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
         resolution = 64
         self.eikonal_loss = EikonalLoss(spacing=2/resolution).to('cuda')
         self.combined_geometric_loss = CombinedGeometricLoss(spacing=2/resolution).to('cuda')
+        self.counter_dec = 0
+        self.counter_enc = 0
+        
     
     def training_losses(
         self,
@@ -202,11 +209,24 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
             if torch.isnan(p).any() or torch.isinf(p).any():
                 with open(os.path.join(self.output_dir,"nan_debug.log"), "a") as f:
                     f.write(f"Parameter {name} of decoder has NaNs or Infs! Step {self.step}")
+
         z, mean, logvar = self.training_models['encoder'](sdf.float(), sample_posterior=True, return_raw=True)
+        if not torch.isfinite(z).all():
+            print(f"[Step {self.step}] NaN in latent z.")
+            with open(os.path.join(self.output_dir,"nan_debug.log"), "a") as f:
+                f.write(f"[Step {self.step}] NaN detected in Z after encoder! Already happened {self.counter_enc} times. Instance: {' '.join(instance)}\n")
+            self.counter_enc+=1
+            raise RuntimeError("NaN in z after sampling.")
         logits = self.training_models['decoder'](z)
+
         if not torch.isfinite(logits).all():
             print(f"NaNs in logits before loss. Aborting step {self.step}.")
-            return {"loss": torch.tensor(float('nan'), device=logits.device)}, {}
+            with open(os.path.join(self.output_dir,"nan_debug.log"), "a") as f:
+                f.write(f"[Step {self.step}] NaN detected in logits before Loss! Already happened {self.counter_dec} times. Instance: {' '.join(instance)}\n")
+            self.counter_dec+=1
+            raise RuntimeError(f"[Step {self.step}] NaN in logits before loss. Instance: {' '.join(instance)}")
+
+        
         logits = torch.nan_to_num(logits, nan=0.0, posinf=1e6, neginf=-1e6)
         terms = edict(loss = 0.0)
         if self.loss_type == 'bce':
@@ -234,13 +254,15 @@ class SparseStructureVaeSDFTrainer(BasicTrainer):
         terms["loss"] = terms["loss"] + self.lambda_kl * terms["kl"]
         # print(f"[Step {self.step}] NaN detected! Instance: {' '.join(instance)}\n")
         if not torch.isfinite(terms["loss"]):
-            with open(os.path.join(self.output_dir,"nan_debug.log", "a") as f:
+            with open(os.path.join(self.output_dir,"nan_debug.log"), "a") as f:
                 f.write(f"[Step {self.step}] NaN detected! Instance: {' '.join(instance)}\n")
                 f.write(f"  l1: {terms['l1']}, eikonal: {terms['eikonal']}, normal: {terms.get('normal', 'n/a')}\n")
                 f.write(f"  logits max: {logits.max().item()}, min: {logits.min().item()}\n")
                 f.write(f"logvar stats: {logvar.min().item()}, {logvar.max().item()}")
                 f.write(f"mean stats: {mean.min().item()}, {mean.max().item()}")
-        return terms, {"logvar_min": logvar.min().item(), "logvar_min": logvar.min().item(),"mean_min": mean.min().item(), "mean_min": mean.min().item(),}
+        with open(os.path.join(self.output_dir,"instances.log"), "a") as f:
+            f.write(f"[Step {self.step}] Instance: {' '.join(instance)}\n")
+        return terms, {"logvar_min": logvar.min().item(), "logvar_min": logvar.min().item(),"mean_min": mean.min().item(), "mean_min": mean.min().item(), "skipped": False}
     
     @torch.no_grad()
     def snapshot(self, suffix=None, num_samples=64, batch_size=1, verbose=False):
