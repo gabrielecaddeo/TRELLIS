@@ -47,7 +47,7 @@ class SparseStructureSDF(StandardDatasetBase):
         ss[:, coords[:, 0], coords[:, 1], coords[:, 2]] = 1
 
         random_number = random.randint(0, 23)
-        sdf = torch.tensor(np.load(os.path.join(root, 'data', instance, 'sdfs', f'{instance}_f{random_number:03d}.npy')), dtype=torch.float32)
+        sdf = torch.tensor(np.load(os.path.join(root, 'data_pose', instance, 'sdfs', f'{instance}_f{random_number:03d}.npy')), dtype=torch.float32)
         sdf = torch.clamp(sdf, -2, 2)
         sdf = sdf.unsqueeze(0)
         return {'ss': ss, 'sdf': sdf, 'instance': instance}
