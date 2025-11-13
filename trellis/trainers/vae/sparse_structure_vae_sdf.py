@@ -32,6 +32,63 @@ class EikonalLoss(torch.nn.Module):
         return ((gradient_norm - 1.0) ** 2).mean()
 
 
+
+    def forward(self, s_pred_grid, s_gt_grid):
+        h = self.spacing
+        denom = 2.0 * h
+
+        with torch.amp.autocast('cuda', enabled=False):
+            # --- replicate-pad once, then VALID conv (padding=0) ---
+            pad = (1,1, 1,1, 1,1)  # W, H, D
+            s_pred = F.pad(s_pred_grid, pad, mode='replicate')
+            s_gt   = F.pad(s_gt_grid,   pad, mode='replicate')
+
+            pred_gradients = F.conv3d(s_pred, self.kernel, padding=0) / denom  # [B,3,D,H,W]
+            gt_gradients   = F.conv3d(s_gt,   self.kernel, padding=0) / denom
+
+            # --- Eikonal ---
+            pred_grad_norm = torch.norm(pred_gradients, p=2, dim=1)            # [B,D,H,W]
+            pred_grad_norm = torch.clamp(pred_grad_norm, 1e-4, 10.0)
+            eikonal_per_voxel = (pred_grad_norm - 1.0) ** 2
+
+            # --- Normal consistency ---
+            gt_grad_norm = torch.norm(gt_gradients, p=2, dim=1, keepdim=True)
+            gt_grad_norm = torch.clamp(gt_grad_norm, 1e-4, 10.0)
+
+            pred_normals = pred_gradients / (pred_grad_norm.unsqueeze(1) + 1e-8)
+            gt_normals   = gt_gradients   / gt_grad_norm
+
+            cos_sim = torch.sum(pred_normals * gt_normals, dim=1)             # [B,D,H,W]
+            cos_sim = torch.clamp(cos_sim, -1.0 + 1e-6, 1.0 - 1e-6)
+            normal_per_voxel = 1.0 - cos_sim
+
+            # --- masks: narrow band & interior (drop 1-voxel rim) ---
+            band = (torch.abs(s_gt_grid.squeeze(1)) < (2 * h))                 # [B,D,H,W]
+            _, _, D, H, W = s_pred_grid.shape
+            interior = torch.zeros((D, H, W), dtype=torch.bool,
+                                   device=s_pred_grid.device)
+            interior[1:-1, 1:-1, 1:-1] = True
+            band_interior = band & interior
+
+            # --- subsampling or full reduction ---
+            if self.num_samples is not None and self.num_samples < s_pred_grid.numel():
+                num_vox = s_pred_grid.numel()
+                idx = torch.randint(0, num_vox, (self.num_samples,), device=s_pred_grid.device)
+                eikonal_loss = eikonal_per_voxel.view(-1)[idx].mean()
+
+                masked_normal = torch.masked_select(normal_per_voxel, band_interior)
+                if masked_normal.numel() > 0:
+                    n = min(self.num_samples, masked_normal.numel())
+                    sidx = torch.randint(0, masked_normal.numel(), (n,), device=s_pred_grid.device)
+                    normal_loss = masked_normal[sidx].mean()
+                else:
+                    normal_loss = s_pred_grid.new_tensor(0.0)
+            else:
+                eikonal_loss = torch.masked_select(eikonal_per_voxel, interior).mean()
+                normal_loss  = torch.masked_select(normal_per_voxel, band_interior).mean()
+
+        return eikonal_loss, normal_loss
+
 class CombinedGeometricLoss(torch.nn.Module):
     """
     Computes a combined Eikonal and Normal Consistency loss for a grid-based SDF.
@@ -58,9 +115,12 @@ class CombinedGeometricLoss(torch.nn.Module):
         # The denominator in the central difference formula is (2 * h)
         denominator = 2.0 * self.spacing
         with torch.amp.autocast('cuda', enabled=False):
+            pad = (1,1, 1,1, 1,1)  # W, H, D
+            s_pred = F.pad(s_pred_grid, pad, mode='replicate')
+            s_gt   = F.pad(s_gt_grid,   pad, mode='replicate')
             # Calculate gradients for both predicted and ground truth grids
-            pred_gradients = F.conv3d(s_pred_grid, self.kernel, padding=1) / denominator
-            gt_gradients = F.conv3d(s_gt_grid, self.kernel, padding=1) / denominator
+            pred_gradients = F.conv3d(s_pred, self.kernel, padding=0) / denominator
+            gt_gradients = F.conv3d(s_gt, self.kernel, padding=0) / denominator
 
             # --- 2. Eikonal Loss Calculation ---
             pred_gradient_norm = torch.norm(pred_gradients, p=2, dim=1) # Norm is now [B, D, H, W]
@@ -69,7 +129,7 @@ class CombinedGeometricLoss(torch.nn.Module):
             eikonal_per_voxel_loss = (pred_gradient_norm - 1.0) ** 2
             # --- 3. Normal Consistency Loss Calculation ---
             # Create a mask for the narrow band around the surface
-            surface_mask = torch.abs(s_gt_grid.squeeze(1)) < (2 * self.spacing) # Mask is [B, D, H, W]
+            # surface_mask = torch.abs(s_gt_grid.squeeze(1)) < (2 * self.spacing) # Mask is [B, D, H, W]
             # Add clamp
             gt_grad_norm = torch.norm(gt_gradients, p=2, dim=1, keepdim=True)
             gt_grad_norm = torch.clamp(gt_grad_norm, min=1e-4, max=10.0)
@@ -83,6 +143,13 @@ class CombinedGeometricLoss(torch.nn.Module):
             cos_sim = torch.clamp(cos_sim, min=-1.0 + 1e-4, max=1.0 - 1e-4)
             normal_per_voxel_loss = 1.0 - cos_sim # Result is [B, D, H, W]
 
+            # --- masks: narrow band & interior (drop 1-voxel rim) ---
+            band = (torch.abs(s_gt_grid.squeeze(1)) < (2 * self.spacing))                 # [B,D,H,W]
+            _, _, D, H, W = s_pred_grid.shape
+            interior = torch.zeros((D, H, W), dtype=torch.bool,
+                                   device=s_pred_grid.device)
+            interior[1:-1, 1:-1, 1:-1] = True
+            band_interior = band & interior
             
             # --- 4. Optional Stochastic Subsampling ---
             if self.num_samples is not None and self.num_samples < s_pred_grid.numel():
@@ -93,7 +160,7 @@ class CombinedGeometricLoss(torch.nn.Module):
                 eikonal_loss = eikonal_per_voxel_loss.view(-1)[indices].mean()
     
                 # For normal loss, we only sample from the surface region for efficiency
-                masked_normal_loss = torch.masked_select(normal_per_voxel_loss, surface_mask)
+                masked_normal_loss = torch.masked_select(normal_per_voxel_loss, band_interior)
                 if masked_normal_loss.numel() > 0:
                     # To keep it simple, if the number of surface points is large enough, we sample from it.
                     # A more complex strategy could be used if needed.
@@ -104,8 +171,8 @@ class CombinedGeometricLoss(torch.nn.Module):
                     normal_loss = torch.tensor(0.0, device=s_pred_grid.device) # No surface points found
             else:
                 # --- 5. Full Grid Loss Calculation ---
-                eikonal_loss = eikonal_per_voxel_loss.mean()
-                normal_loss = torch.masked_select(normal_per_voxel_loss, surface_mask).mean()
+                eikonal_loss = torch.masked_select(eikonal_per_voxel_loss, interior).mean()
+                normal_loss = torch.masked_select(normal_per_voxel_loss, band_interior).mean()
 
         if torch.isnan(pred_gradients).any():
             print("⚠️ NaN in pred_gradients")
