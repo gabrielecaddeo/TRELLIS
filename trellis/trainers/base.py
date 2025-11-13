@@ -232,8 +232,17 @@ class Trainer:
         num_samples_per_process = int(np.ceil(num_samples / self.world_size))
         samples = self.run_snapshot(num_samples_per_process, batch_size=batch_size, verbose=verbose)
 
+        ## NEW ##
+        for raw_key in ('gt', 'recon'):
+            if raw_key in samples and samples[raw_key]['type'] == 'sample':
+                samples[f'{raw_key}_sdf'] = {
+                    'value': samples[raw_key]['value'].detach().clone(),
+                    'type': 'sdf'
+                }
+        
         # Preprocess images
         for key in list(samples.keys()):
+            print(key)
             if samples[key]['type'] == 'sample':
                 vis = self.visualize_sample(samples[key]['value'])
                 if isinstance(vis, dict):
@@ -242,6 +251,8 @@ class Trainer:
                     del samples[key]
                 else:
                     samples[key] = {'value': vis, 'type': 'image'}
+        
+
 
         # Gather results
         if self.world_size > 1:
@@ -257,7 +268,8 @@ class Trainer:
 
         # Save images
         if self.is_master:
-            os.makedirs(os.path.join(self.output_dir, 'samples', suffix), exist_ok=True)
+            out_dir = os.path.join(self.output_dir, 'samples', suffix)
+            os.makedirs(out_dir, exist_ok=True)
             for key in samples.keys():
                 if samples[key]['type'] == 'image':
                     utils.save_image(
@@ -268,9 +280,9 @@ class Trainer:
                         value_range=self.dataset.value_range,
                     )
                 elif samples[key]['type'] == 'number':
-                    min = samples[key]['value'].min()
-                    max = samples[key]['value'].max()
-                    images = (samples[key]['value'] - min) / (max - min)
+                    vmin = samples[key]['value'].min()
+                    vmax = samples[key]['value'].max()
+                    images = (samples[key]['value'] - vmin) / (vmax - vmin)
                     images = utils.make_grid(
                         images,
                         nrow=int(np.sqrt(num_samples)),
@@ -279,8 +291,36 @@ class Trainer:
                     save_image_with_notes(
                         images,
                         os.path.join(self.output_dir, 'samples', suffix, f'{key}_{suffix}.jpg'),
-                        notes=f'{key} min: {min}, max: {max}',
+                        notes=f'{key} min: {vmin}, max: {vmax}',
                     )
+
+            any_key = next(iter(samples))
+            N = samples[any_key]['value'].shape[0]
+            index_width = max(4, len(str(N - 1)))
+
+            # 1) Save each rendered IMAGE individually (no grid)
+            for key, entry in samples.items():
+                if entry['type'] == 'image':
+                    imgs = entry['value'].detach().cpu()  # (N, C, H, W)
+                    for i in range(imgs.shape[0]):
+                        fn = f"{str(i).zfill(index_width)}_{key}_{suffix}.jpg"
+                        fp = os.path.join(out_dir, fn)
+                        utils.save_image(
+                            imgs[i:i+1],   # keep batch dim
+                            fp,
+                            nrow=1,
+                            normalize=True,
+                            value_range=self.dataset.value_range,
+                        )
+
+            # 2) Save raw SDF tensors per sample for gt/recon
+            for key, entry in samples.items():
+                if entry['type'] == 'sdf':
+                    sdfs = entry['value'].detach().cpu()  # arbitrary shape per sample
+                    for i in range(sdfs.shape[0]):
+                        fn = f"{str(i).zfill(index_width)}_{key}_{suffix}.pt"
+                        fp = os.path.join(out_dir, fn)
+                        torch.save(sdfs[i], fp)
 
         if self.is_master:
             print(' Done.')
@@ -348,28 +388,69 @@ class Trainer:
         """
         Run training.
         """
+        torch.autograd.set_detect_anomaly(True)
+
+        def register_nan_hooks(module, name_prefix=""):
+            def hook(mod, inp, out, full_name):
+                # Check outputs (could be tensor or tuple/list)
+                outs = out if isinstance(out, (tuple, list)) else (out,)
+                for idx, t in enumerate(outs):
+                    if t is None:
+                        continue
+                    if not torch.isfinite(t).all():
+                        # Minimal stats to help triage
+                        with open(os.path.join(self.output_dir, "nan_debug_autograd.log"), "a") as f:
+                            f.write(
+                                f"[Step {self.step}] NaN/Inf after {name_prefix}{full_name} "
+                                f"(type={mod.__class__.__name__}, out_idx={idx}) "
+                                f"min={t.min().item() if torch.isfinite(t).any() else 'nan'} "
+                                f"max={t.max().item() if torch.isfinite(t).any() else 'nan'}\n"
+                            )
+                        raise RuntimeError(f"NaN/Inf after {name_prefix}{full_name}")
+
+            # Important: capture the module *name* per submodule in the closure via default arg
+            for name, m in module.named_modules():
+                m.register_forward_hook(lambda mod, inp, out, n=name: hook(mod, inp, out, n))
+
+        # After you build:
+        
         if self.is_master:
+            if 'encoder' in self.training_models:
+                register_nan_hooks(self.training_models['encoder'], name_prefix="encoder.")
+            if 'decoder' in self.training_models:
+                register_nan_hooks(self.training_models['decoder'], name_prefix="decoder.")
             print('\nStarting training...')
             self.snapshot_dataset()
         if self.step == 0:
             self.snapshot(suffix='init')
         else: # resume
             self.snapshot(suffix=f'resume_step{self.step:07d}')
-
         log = []
         time_last_print = 0.0
         time_elapsed = 0.0
         while self.step < self.max_steps:
+            
             time_start = time.time()
 
             data_list = self.load_data()
-            step_log = self.run_step(data_list)
+            try:
+                step_log = self.run_step(data_list)
+            except Exception as e:
+                print(f"⚠️ [Step {self.step}] Skipped due to exception: {e}")
+                for m in self.training_models.values():
+                    for p in m.parameters():
+                        if p.grad is not None:
+                            p.grad.detach_(); p.grad.zero_()
+                self.optimizer.zero_grad(set_to_none=True)
+                
+                continue
+            
 
             time_end = time.time()
             time_elapsed += time_end - time_start
 
             self.step += 1
-
+            
             # Print progress
             if self.is_master and self.step % self.i_print == 0:
                 speed = self.i_print / (time_elapsed - time_last_print) * 3600
