@@ -12,7 +12,10 @@ import random
 
 from trellis import models, datasets, trainers
 from trellis.utils.dist_utils import setup_dist
-
+seed = 1337
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
+torch.use_deterministic_algorithms(True, warn_only=True)
 
 def find_ckpt(cfg):
     # Load checkpoint
@@ -74,8 +77,8 @@ def main(local_rank, cfg):
         name: getattr(models, model.name)(**model.args).cuda()
         for name, model in cfg.models.items()
     }
-        # Load pretrained weights and freeze encoder
-    if 'encoder' in model_dict:
+    # Load pretrained weights and freeze encoder
+    if cfg.freeze_encoder and 'encoder' in cfg.models:
         encoder = model_dict['encoder']
 
         from safetensors.torch import load_file
@@ -113,14 +116,14 @@ if __name__ == '__main__':
     # Arguments and config
     parser = argparse.ArgumentParser()
     ## config
-    parser.add_argument('--config', type=str, default='/home/user/TRELLIS/configs/vae/ss_vae_conv3d_16l8_fp16.json', required=False, help='Experiment config file')
+    parser.add_argument('--config', type=str, default='/home/user/TRELLIS/configs/generation/ss_flow_img_dit_L_16l8_fp16_sdf.json', required=False, help='Experint config file')
     ## io and resume
-    parser.add_argument('--output_dir', default='/home/user/TRELLIS/outputs/ss_vae_conv3d_16l8_fp16_1node', type=str, required=False, help='Output directory')
+    parser.add_argument('--output_dir', default='/home/user/TRELLIS/outputs/flow_outer_rim_130', type=str, required=False, help='Output directory')
     parser.add_argument('--load_dir', type=str, default='', help='Load directory, default to output_dir')
     parser.add_argument('--ckpt', type=str, default='latest', help='Checkpoint step to resume training, default to latest')
-    parser.add_argument('--data_dir', type=str, default='/home/user/TRELLIS/datasets/ObjaverseXL_sketchfab/', help='Data directory')
+    parser.add_argument('--data_dir', type=str, default='/home/user/TRELLIS/datasets/ABO', help='Data directory')
     parser.add_argument('--auto_retry', type=int, default=3, help='Number of retries on error')
-    ## dubug
+    ## debug
     parser.add_argument('--tryrun', action='store_true', help='Try run without training')
     parser.add_argument('--profile', action='store_true', help='Profile training')
     ## multi-node and multi-gpu
@@ -129,6 +132,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_gpus', type=int, default=-1, help='Number of GPUs per node, default to all')
     parser.add_argument('--master_addr', type=str, default='localhost', help='Master address for distributed training')
     parser.add_argument('--master_port', type=str, default='12345', help='Port for distributed training')
+    parser.add_argument('--freeze_encoder', action='store_true', help='Freeze encoder weights')
     opt = parser.parse_args()
     opt.load_dir = opt.load_dir if opt.load_dir != '' else opt.output_dir
     opt.num_gpus = torch.cuda.device_count() if opt.num_gpus == -1 else opt.num_gpus
