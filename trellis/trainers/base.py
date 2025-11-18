@@ -244,13 +244,20 @@ class Trainer:
         for key in list(samples.keys()):
             print(key)
             if samples[key]['type'] == 'sample':
-                vis = self.visualize_sample(samples[key]['value'])
+                ## decomment for vae##
+                # vis = self.visualize_sample(samples[key]['value'])
+                vis, sdf = self.visualize_sample(samples[key]['value'])
                 if isinstance(vis, dict):
                     for k, v in vis.items():
                         samples[f'{key}_{k}'] = {'value': v, 'type': 'image'}
                     del samples[key]
                 else:
                     samples[key] = {'value': vis, 'type': 'image'}
+                    ## Comment for vae##
+                    samples[f'{key}_sdf'] = {
+                    'value': sdf.detach().clone(),
+                    'type': 'sdf'
+                }
         
 
 
@@ -321,7 +328,12 @@ class Trainer:
                         fn = f"{str(i).zfill(index_width)}_{key}_{suffix}.pt"
                         fp = os.path.join(out_dir, fn)
                         torch.save(sdfs[i], fp)
-
+            # Not useful
+            # sdfs = sdfs.detach.cpu()
+            # for i in range(sdfs.shape[0]):
+            #     fn = f"{str(i).zfill(index_width)}_{key}_{suffix}.pt"
+            #     fp = os.path.join(out_dir, fn)
+            #     torch.save(sdfs[i], fp)
         if self.is_master:
             print(' Done.')
 
@@ -413,14 +425,14 @@ class Trainer:
                 m.register_forward_hook(lambda mod, inp, out, n=name: hook(mod, inp, out, n))
 
         # After you build:
-        
-        if self.is_master:
-            if 'encoder' in self.training_models:
-                register_nan_hooks(self.training_models['encoder'], name_prefix="encoder.")
-            if 'decoder' in self.training_models:
-                register_nan_hooks(self.training_models['decoder'], name_prefix="decoder.")
-            print('\nStarting training...')
-            self.snapshot_dataset()
+        # decomment for VAE
+        # if self.is_master:
+        #     if 'encoder' in self.training_models:
+        #         register_nan_hooks(self.training_models['encoder'], name_prefix="encoder.")
+        #     if 'decoder' in self.training_models:
+        #         register_nan_hooks(self.training_models['decoder'], name_prefix="decoder.")
+        #     print('\nStarting training...')
+        #     self.snapshot_dataset()
         if self.step == 0:
             self.snapshot(suffix='init')
         else: # resume
