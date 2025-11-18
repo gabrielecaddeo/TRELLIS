@@ -6,7 +6,7 @@ import torch
 import utils3d
 from ..representations.octree import DfsOctree as Octree
 from ..renderers import OctreeRenderer
-from .components import StandardDatasetBase, TextConditionedMixin, ImageConditionedMixin
+from .components import StandardDatasetBase, TextConditionedMixin, ImageConditionedMixin, ImageConditionedMixinRotation
 from .. import models
 
 
@@ -216,7 +216,7 @@ class SparseStructureLatentVisMixinSDF:
                 image[:, 512 * (j // tile[1]):512 * (j // tile[1] + 1), 512 * (j % tile[1]):512 * (j % tile[1] + 1)] = res['color']
             images.append(image)
             
-        return torch.stack(images)  
+        return torch.stack(images), x_0
 
 class SparseStructureLatent(SparseStructureLatentVisMixin, StandardDatasetBase):
     """
@@ -325,7 +325,7 @@ class SparseStructureLatentSDF(SparseStructureLatentVisMixinSDF, StandardDataset
         return metadata, stats
                 
     def get_instance(self, root, instance, n_view):
-        latent = np.load(os.path.join(root, 'ss_latents_sdf', self.latent_model, f'{instance}_{n_view}.npz'))
+        latent = np.load(os.path.join(root, 'ss_latents_sdf_pose', self.latent_model, f'{instance}_{n_view}.npz'))
         z = torch.tensor(latent['mean']).float()
         if self.normalization is not None:
             z = (z - self.mean) / self.std
@@ -349,7 +349,7 @@ class ImageConditionedSparseStructureLatent(ImageConditionedMixin, SparseStructu
     """
     pass
     
-class ImageConditionedSparseStructureLatentSDF(ImageConditionedMixin, SparseStructureLatentSDF):
+class ImageConditionedSparseStructureLatentSDF(ImageConditionedMixinRotation, SparseStructureLatentSDF):
     """
     Image-conditioned sparse structure dataset
     """
