@@ -21,12 +21,12 @@
     "dataset": {
         "name": "ImageConditionedSparseStructureLatentSDF",
         "args": {
-            "latent_model": "vae_ABO_HSSD_3D_rot_outer_rim_0130000",
+            "latent_model": "vae_ABO_HSSD_3D_rot_outer_rim_0140000",
             "min_aesthetic_score": 4.5,
             "image_size": 518,
             "pretrained_ss_dec": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16",
             "ss_dec_path": "/home/user/TRELLIS/outputs/vae_ABO_HSSD_3D_rot_outer_rim",
-            "ss_dec_ckpt": "step0130000"
+            "ss_dec_ckpt": "step0140000"
         }
     },
     "trainer": {
