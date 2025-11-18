@@ -146,41 +146,43 @@ class ImageConditionedMixinRotation:
         stats['Cond rendered'] = len(metadata)
         return metadata, stats
     
-    def get_instance(self, root, instance):
-        image_root = os.path.join(root, 'renders_cond', instance)
+    def get_instance(self, root, instance_name):
+        image_root = os.path.join(root, 'renders_cond', instance_name)
         with open(os.path.join(image_root, 'transforms.json')) as f:
-            metadata = json.load(f)
-        n_views = len(metadata['frames'])
-        view = np.random.randint(n_views)
-        pack = super().get_instance(root, instance, view)
-       
-        metadata = metadata['frames'][view]
+            meta_all = json.load(f)
 
-        image_path = os.path.join(image_root, metadata['file_path'])
-        image = Image.open(image_path)
+        view = np.random.randint(len(meta_all['frames']))
+        fr   = meta_all['frames'][view]
+        image_path = os.path.join(image_root, fr['file_path'])
+        image_rgba = Image.open(image_path).convert('RGBA')
+        pack = super().get_instance(root, instance_name, view)
+        # Load pose2d_meta that you saved during data generation
+        posed_name = f"{instance_name}_f{view:03d}"
+        with open(os.path.join(root, 'data_pose', instance_name, f"{posed_name}_meta.json")) as f:
+            posed_meta = json.load(f)
 
-        alpha = np.array(image.getchannel(3))
-        bbox = np.array(alpha).nonzero()
-        bbox = [bbox[1].min(), bbox[0].min(), bbox[1].max(), bbox[0].max()]
-        center = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]
-        hsize = max(bbox[2] - bbox[0], bbox[3] - bbox[1]) / 2
-        aug_size_ratio = 1.2
-        aug_hsize = hsize * aug_size_ratio
-        aug_center_offset = [0, 0]
-        aug_center = [center[0] + aug_center_offset[0], center[1] + aug_center_offset[1]]
-        aug_bbox = [int(aug_center[0] - aug_hsize), int(aug_center[1] - aug_hsize), int(aug_center[0] + aug_hsize), int(aug_center[1] + aug_hsize)]
-        image = image.crop(aug_bbox)
+        # We only need the 2D pose block:
+        pose2d_meta = posed_meta.get("pose2d_meta", None)
+        if pose2d_meta is None:
+            # fallback or raise
+            raise RuntimeError("pose2d_meta not found; regenerate posed metadata")
 
-        image = image.resize((self.image_size, self.image_size), Image.Resampling.LANCZOS)
-        alpha = image.getchannel(3)
-        image = image.convert('RGB')
-        image = torch.tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
-        alpha = torch.tensor(np.array(alpha)).float() / 255.0
-        image = image * alpha.unsqueeze(0)
-        pack['cond'] = image
-       
+        # Rebuild pose-faithful conditioning image
+        cond_img = self.collage_from_meta_bbox_preserve_aspect(
+            image_rgba=image_rgba,
+            pose2d_meta=pose2d_meta,
+            out_size=self.image_size
+        )
+        cond_tensor = self.rgba_to_rgb_tensor(cond_img)
+
+        # pack = {}
+        pack['cond'] = cond_tensor
+        # pack['frame_id'] = view
+        # pack['instance'] = instance_name
+
         return pack
-    def collage_from_meta_bbox_preserve_aspect(
+    
+    def collage_from_meta_bbox_preserve_aspect(self,
         image_rgba: Image.Image,
         pose2d_meta: dict,
         out_size: int = 1024,
@@ -239,44 +241,11 @@ class ImageConditionedMixinRotation:
         canvas.alpha_composite(sprite_resized, dest=(paste_x, paste_y))
         return canvas
     
-    def rgba_to_rgb_tensor(pose_img_rgba: Image.Image) -> torch.Tensor:
+    def rgba_to_rgb_tensor(self, pose_img_rgba: Image.Image) -> torch.Tensor:
         arr = np.asarray(pose_img_rgba)            # HxWx4 (uint8)
         rgb = arr[..., :3].astype(np.float32) / 255.0
         a   = (arr[..., 3:4].astype(np.float32) / 255.0)
         rgb = rgb * a                              # premultiply over black
         return torch.from_numpy(rgb.transpose(2,0,1)).contiguous()  # [3,H,W]
     
-    def get_instance2(self, root, instance_name):
-        image_root = os.path.join(root, 'renders_cond', instance_name)
-        with open(os.path.join(image_root, 'transforms.json')) as f:
-            meta_all = json.load(f)
-
-        view = np.random.randint(len(meta_all['frames']))
-        fr   = meta_all['frames'][view]
-        image_path = os.path.join(image_root, fr['file_path'])
-        image_rgba = Image.open(image_path).convert('RGBA')
-
-        # Load pose2d_meta that you saved during data generation
-        posed_name = f"{instance_name}_f{view:03d}"
-        with open(os.path.join(root, 'POSED', instance_name, f"{posed_name}_meta.json")) as f:
-            posed_meta = json.load(f)
-
-        # We only need the 2D pose block:
-        pose2d_meta = posed_meta.get("pose2d_meta", None)
-        if pose2d_meta is None:
-            # fallback or raise
-            raise RuntimeError("pose2d_meta not found; regenerate posed metadata")
-
-        # Rebuild pose-faithful conditioning image
-        cond_img = self.collage_from_meta_bbox_preserve_aspect(
-            image_rgba=image_rgba,
-            pose2d_meta=pose2d_meta,
-            out_size=self.image_size
-        )
-        cond_tensor = self.rgba_to_rgb_tensor(cond_img)
-
-        pack = {}
-        pack['cond'] = cond_tensor
-        pack['frame_id'] = view
-        pack['instance'] = instance_name
-        return pack
+    
