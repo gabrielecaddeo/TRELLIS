@@ -376,7 +376,7 @@ class BasicTrainer(Trainer):
                         scaled_l = l * (2 ** self.log_scale)
 
                         scaled_l.backward()
-                        for name, p in self.training_models['decoder'].named_parameters():
+                        for name, p in self.training_models['denoiser'].named_parameters():
                             if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
                                 with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
                                     f.write(f"NaN/Inf in gradient of denoiser param: {name} at step {self.step}\n")
