@@ -41,7 +41,11 @@ class ClassifierFreeGuidanceMixin:
             if not isinstance(cond, dict):
                 cond = select(cond, neg_cond, mask)
             else:
-                cond = dict_foreach([cond, neg_cond], lambda x: select(x[0], x[1], mask))
+                out = {}
+                for k in cond.keys():
+                    out[k] = select(cond[k], neg_cond[k], mask)
+                cond = out
+                # cond = dict_foreach([cond, neg_cond], lambda x: select(x[0], x[1], mask))
     
         return cond
 

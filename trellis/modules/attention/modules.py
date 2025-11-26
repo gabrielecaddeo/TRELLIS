@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .full_attn import scaled_dot_product_attention
-
+import math
 
 class MultiHeadRMSNorm(nn.Module):
     def __init__(self, dim: int, heads: int):
@@ -144,3 +144,121 @@ class MultiHeadAttention(nn.Module):
         h = h.reshape(B, L, -1)
         h = self.to_out(h)
         return h
+
+
+class MultiHeadAttentionWeighted(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        num_heads: int,
+        ctx_channels: Optional[int]=None,
+        type: Literal["self", "cross"] = "self",
+        attn_mode: Literal["full", "windowed"] = "full",
+        window_size: Optional[int] = None,
+        shift_window: Optional[Tuple[int, int, int]] = None,
+        qkv_bias: bool = True,
+        use_rope: bool = False,
+        qk_rms_norm: bool = False,
+    ):
+        super().__init__()
+        assert channels % num_heads == 0
+        assert type in ["self", "cross"], f"Invalid attention type: {type}"
+        assert attn_mode in ["full", "windowed"], f"Invalid attention mode: {attn_mode}"
+        assert type == "self" or attn_mode == "full", "Cross-attention only supports full attention"
+        
+        if attn_mode == "windowed":
+            raise NotImplementedError("Windowed attention is not yet implemented")
+        
+        self.channels = channels
+        self.head_dim = channels // num_heads
+        self.ctx_channels = ctx_channels if ctx_channels is not None else channels
+        self.num_heads = num_heads
+        self._type = type
+        self.attn_mode = attn_mode
+        self.window_size = window_size
+        self.shift_window = shift_window
+        self.use_rope = use_rope
+        self.qk_rms_norm = qk_rms_norm
+
+        if self._type == "self":
+            self.to_qkv = nn.Linear(channels, channels * 3, bias=qkv_bias)
+        else:
+            self.to_q = nn.Linear(channels, channels, bias=qkv_bias)
+            self.to_kv = nn.Linear(self.ctx_channels, channels * 2, bias=qkv_bias)
+            
+        if self.qk_rms_norm:
+            self.q_rms_norm = MultiHeadRMSNorm(self.head_dim, num_heads)
+            self.k_rms_norm = MultiHeadRMSNorm(self.head_dim, num_heads)
+            
+        self.to_out = nn.Linear(channels, channels)
+
+        if use_rope:
+            self.rope = RotaryPositionEmbedder(channels)
+    
+    def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None, mask_weight: Optional[torch.Tensor] = None, indices: Optional[torch.Tensor] = None) -> torch.Tensor:
+        B, L, C = x.shape
+        if self._type == "self":
+            qkv = self.to_qkv(x)
+            qkv = qkv.reshape(B, L, 3, self.num_heads, -1)
+            if self.use_rope:
+                q, k, v = qkv.unbind(dim=2)
+                q, k = self.rope(q, k, indices)
+                qkv = torch.stack([q, k, v], dim=2)
+            if self.attn_mode == "full":
+                if self.qk_rms_norm:
+                    q, k, v = qkv.unbind(dim=2)
+                    q = self.q_rms_norm(q)
+                    k = self.k_rms_norm(k)
+                    h = scaled_dot_product_attention(q, k, v)
+                else:
+                    h = scaled_dot_product_attention(qkv)
+            elif self.attn_mode == "windowed":
+                raise NotImplementedError("Windowed attention is not yet implemented")
+        else:
+            Lkv = context.shape[1]
+            q = self.to_q(x)
+            kv = self.to_kv(context)
+            q = q.reshape(B, L, self.num_heads, -1)
+            kv = kv.reshape(B, Lkv, 2, self.num_heads, -1)
+            if self.qk_rms_norm:
+                if mask_weight is not None:
+                    q = self.q_rms_norm(q)
+                    k, v = kv.unbind(dim=2)
+                    k = self.k_rms_norm(k)
+                    h = self.weighted_scaled_dot_product_attention(q, k, v, mask_weight)
+                else:
+                    q = self.q_rms_norm(q)
+                    k, v = kv.unbind(dim=2)
+                    k = self.k_rms_norm(k)
+                    h = scaled_dot_product_attention(q, k, v)
+            else:
+                if mask_weight is not None:
+                    k, v = kv.unbind(dim=2)
+                    h = self.weighted_scaled_dot_product_attention(q, k, v, mask_weight)
+                else:
+                    h = scaled_dot_product_attention(q, kv)
+        h = h.reshape(B, L, -1)
+        h = self.to_out(h)
+        return h
+
+    def weighted_scaled_dot_product_attention(self, q, k, v, mask_weight, eps=1e-6):
+        # q: (B, L_q, num_heads, head_dim)
+        # k: (B, L_k, num_heads, head_dim)
+        # v: (B, L_k, num_heads, head_dim)
+        # mask_weight: (B, L_k, 1)
+        assert mask_weight.shape[1] == k.shape[1] - 5
+        d = k.size(-1)
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        attn_logits = q @ k.transpose(-2, -1) / math.sqrt(d) # (B, num_heads, L_q, L_k)
+
+        B, L_k, _ = mask_weight.shape
+        cls_weight = torch.ones(B, 5, device=mask_weight.device, dtype=mask_weight.dtype)
+        mask_weight = torch.cat([cls_weight, mask_weight.squeeze(2)], dim=1) # (B, L_k + 5)
+        mask_bias = torch.log(mask_weight.unsqueeze(1).unsqueeze(1) + eps)
+        attn_logits = attn_logits + mask_bias
+
+        attn = torch.softmax(attn_logits, dim=-1)
+        output = attn @ v
+        return output.permute(0, 2, 1, 3) # (B, L_q, num_heads, head_dim)

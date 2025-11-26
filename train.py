@@ -79,7 +79,7 @@ def main(local_rank, cfg):
     }
     # Load pretrained weights and freeze encoder
     if cfg.freeze_encoder and 'encoder' in cfg.models:
-        encoder = model_dict['encoder']
+        # encoder = model_dict['encoder']
 
         from safetensors.torch import load_file
 
@@ -90,8 +90,20 @@ def main(local_rank, cfg):
         print("Unexpected keys:", unexpected)
 
         # Freeze all parameters
-        for param in encoder.parameters():
+        for param in model_dict['encoder'].parameters():
             param.requires_grad = False
+
+    if 'denoiser' in cfg.models and cfg.load_flow_weights:
+
+        from safetensors.torch import load_file
+
+        # Load pretrained weights
+        
+        missing, unexpected = model_dict['denoiser'].load_state_dict(torch.load(cfg.ckpt_flow_path), strict=False)
+        print("Missing keys:", missing)
+        print("Unexpected keys:", unexpected)
+        model_dict['denoiser'].initialize_input_layer_x0h()
+
 
     # Model summary
     if rank == 0:
@@ -116,12 +128,12 @@ if __name__ == '__main__':
     # Arguments and config
     parser = argparse.ArgumentParser()
     ## config
-    parser.add_argument('--config', type=str, default='/home/user/TRELLIS/configs/generation/ss_flow_img_dit_L_16l8_fp16_sdf.json', required=False, help='Experint config file')
+    parser.add_argument('--config', type=str, default='/home/user/TRELLIS/configs/generation/ss_flow_img_dit_L_16l8_fp16_sdf_conditioned.json', required=False, help='Experint config file')
     ## io and resume
-    parser.add_argument('--output_dir', default='/home/user/TRELLIS/outputs/flow_outer_rim_130', type=str, required=False, help='Output directory')
+    parser.add_argument('--output_dir', default='/home/user/TRELLIS/outputs/flow_conditioned_example', type=str, required=False, help='Output directory')
     parser.add_argument('--load_dir', type=str, default='', help='Load directory, default to output_dir')
     parser.add_argument('--ckpt', type=str, default='latest', help='Checkpoint step to resume training, default to latest')
-    parser.add_argument('--data_dir', type=str, default='/home/user/TRELLIS/datasets/ABO', help='Data directory')
+    parser.add_argument('--data_dir', type=str, default='/home/user/TRELLIS/datasets/Hands', help='Data directory')
     parser.add_argument('--auto_retry', type=int, default=3, help='Number of retries on error')
     ## debug
     parser.add_argument('--tryrun', action='store_true', help='Try run without training')
@@ -133,7 +145,11 @@ if __name__ == '__main__':
     parser.add_argument('--master_addr', type=str, default='localhost', help='Master address for distributed training')
     parser.add_argument('--master_port', type=str, default='12345', help='Port for distributed training')
     parser.add_argument('--freeze_encoder', action='store_true', help='Freeze encoder weights')
+    parser.add_argument('--load_flow_weights', action='store_true', help='Freeze encoder weights')
+    parser.add_argument('--ckpt_flow_path', type=str, default='/home/user/TRELLIS/outputs/flow_outer_rim_140_pose_resume_1/ckpts/denoiser_ema0.9999_step0080000.pt', help='Path to flow ckpt to load weights from')
     opt = parser.parse_args()
+    # Hardcode for debug!!!
+    # opt.load_flow_weights = True
     opt.load_dir = opt.load_dir if opt.load_dir != '' else opt.output_dir
     opt.num_gpus = torch.cuda.device_count() if opt.num_gpus == -1 else opt.num_gpus
     ## Load config

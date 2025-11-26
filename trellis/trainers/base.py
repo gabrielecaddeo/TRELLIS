@@ -202,7 +202,10 @@ class Trainer:
         )
         data = next(iter(dataloader))
         data = recursive_to_device(data, self.device)
-        vis = self.visualize_sample(data)
+        vis= self.visualize_sample(data)
+        if isinstance(vis, tuple):
+            vis = vis[0]
+            sdf = vis[1]
         if isinstance(vis, dict):
             save_cfg = [(f'dataset_{k}', v) for k, v in vis.items()]
         else:
@@ -245,8 +248,12 @@ class Trainer:
             print(key)
             if samples[key]['type'] == 'sample':
                 ## decomment for vae##
-                # vis = self.visualize_sample(samples[key]['value'])
-                vis, sdf = self.visualize_sample(samples[key]['value'])
+                vis = self.visualize_sample(samples[key]['value'])
+                if isinstance(vis, tuple):
+                    vis = vis[0]
+                    sdf = vis[1]
+                ## decomment for flow##
+                # vis, sdf = self.visualize_sample(samples[key]['value'])
                 if isinstance(vis, dict):
                     for k, v in vis.items():
                         samples[f'{key}_{k}'] = {'value': v, 'type': 'image'}
@@ -257,7 +264,7 @@ class Trainer:
                     samples[f'{key}_sdf'] = {
                     'value': sdf.detach().clone(),
                     'type': 'sdf'
-                }
+                        }
         
 
 
@@ -426,13 +433,13 @@ class Trainer:
 
         # After you build:
         # decomment for VAE
-        # if self.is_master:
-        #     if 'encoder' in self.training_models:
-        #         register_nan_hooks(self.training_models['encoder'], name_prefix="encoder.")
-        #     if 'decoder' in self.training_models:
-        #         register_nan_hooks(self.training_models['decoder'], name_prefix="decoder.")
-        #     print('\nStarting training...')
-        #     self.snapshot_dataset()
+        if self.is_master:
+            # if 'encoder' in self.training_models:
+            #     register_nan_hooks(self.training_models['encoder'], name_prefix="encoder.")
+            # if 'decoder' in self.training_models:
+            #     register_nan_hooks(self.training_models['decoder'], name_prefix="decoder.")
+            print('\nStarting training...')
+            self.snapshot_dataset()
         if self.step == 0:
             self.snapshot(suffix='init')
         else: # resume

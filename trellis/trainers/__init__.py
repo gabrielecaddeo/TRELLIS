@@ -11,9 +11,12 @@ __attributes = {
     'SLatVaeMeshDecoderTrainer': 'vae.structured_latent_vae_mesh_dec',
     
     'FlowMatchingTrainer': 'flow_matching.flow_matching',
+    'FlowMatchingTrainerConditioned': 'flow_matching.flow_matching',
     'FlowMatchingCFGTrainer': 'flow_matching.flow_matching',
+    'FlowMatchingCFGTrainerConditioned': 'flow_matching.flow_matching',
     'TextConditionedFlowMatchingCFGTrainer': 'flow_matching.flow_matching',
     'ImageConditionedFlowMatchingCFGTrainer': 'flow_matching.flow_matching',
+    'ImageConditionedFlowMatchingCFGTrainerConditioned': 'flow_matching.flow_matching',
     
     'SparseFlowMatchingTrainer': 'flow_matching.sparse_flow_matching',
     'SparseFlowMatchingCFGTrainer': 'flow_matching.sparse_flow_matching',
@@ -51,10 +54,10 @@ if __name__ == '__main__':
     from .vae.structured_latent_vae_mesh_dec import SLatVaeMeshDecoderTrainer
     
     from .flow_matching.flow_matching import (
-        FlowMatchingTrainer,
-        FlowMatchingCFGTrainer,
+        FlowMatchingTrainer, FlowMatchingTrainerConditioned,
+        FlowMatchingCFGTrainer, FlowMatchingCFGTrainerConditioned,
         TextConditionedFlowMatchingCFGTrainer,
-        ImageConditionedFlowMatchingCFGTrainer,
+        ImageConditionedFlowMatchingCFGTrainer,ImageConditionedFlowMatchingCFGTrainerConditioned,
     )
     
     from .flow_matching.sparse_flow_matching import (

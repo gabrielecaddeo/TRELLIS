@@ -49,8 +49,26 @@ class FlowEulerSampler(Sampler):
        
 
         t = torch.tensor([1000 * t] * x_t.shape[0], device=x_t.device, dtype=torch.float32)
-        if cond is not None and cond.shape[0] == 1 and x_t.shape[0] > 1:
-            cond = cond.repeat(x_t.shape[0], *([1] * (len(cond.shape) - 1)))
+        ## Previous implementation
+        # if cond is not None and cond.shape[0] == 1 and x_t.shape[0] > 1:
+        #     cond = cond.repeat(x_t.shape[0], *([1] * (len(cond.shape) - 1)))
+        B = x_t.shape[0]
+        if cond is not None:
+            if isinstance(cond, torch.Tensor):
+                # Broadcast cond from batch 1 to B if needed
+                if cond.shape[0] == 1 and B > 1:
+                    cond = cond.repeat(B, *([1] * (cond.ndim - 1)))
+
+            elif isinstance(cond, dict):
+                # Broadcast each tensor entry with batch dim 1 -> B
+                new_cond = {}
+                for k, v in cond.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == 1 and B > 1:
+                        new_cond[k] = v.repeat(B, *([1] * (v.ndim - 1)))
+                    else:
+                        new_cond[k] = v
+                cond = new_cond
+
         
         return model(x_t, t, cond)
 
