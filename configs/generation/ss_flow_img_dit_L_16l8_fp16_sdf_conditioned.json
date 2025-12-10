@@ -14,7 +14,11 @@
                 "patch_size": 1,
                 "pe_mode": "ape",
                 "qk_rms_norm": true,
-                "use_fp16": true
+                "use_fp16": true,
+                "use_touch": true,
+                "use_encoding_hand": true,
+                "use_weighted_attention": true,
+                "use_checkpoint": true
             }
         }
     },
@@ -33,12 +37,12 @@
         "name": "ImageConditionedFlowMatchingCFGTrainerConditioned",
         "args": {
             "max_steps": 1000000,
-            "batch_size_per_gpu": 1,
+            "batch_size_per_gpu": 8,
             "batch_split": 1,
             "optimizer": {
                 "name": "AdamW",
                 "args": {
-                    "lr": 0.0001,
+                    "lr": 0.00001,
                     "weight_decay": 0.0
                 }
             },
@@ -55,8 +59,8 @@
                 }
             },
             "i_log": 500,
-            "i_sample": 10000,
-            "i_save": 10000,
+            "i_sample": 2000,
+            "i_save": 2000,
             "p_uncond": 0.1,
             "t_schedule": {
                 "name": "logitNormal",
@@ -69,7 +73,12 @@
             "image_cond_model": "dinov2_vitl14_reg",
             "ss_dec_path": "/home/user/TRELLIS/outputs/vae_ABO_HSSD_3D_rot_outer_rim",
             "ss_dec_ckpt": "step0140000",
-            "lambda_non_interpenetration": 10.0
+            "lambda_non_interpenetration_start": 0.0,
+            "lambda_non_interpenetration_max": 0.0,
+            "lambda_non_interpenetration_warmup": 1000,
+            "lambda_contact": 0.0,
+            "use_encoding_hand": true,
+            "use_touch": true
         }
     }
 }

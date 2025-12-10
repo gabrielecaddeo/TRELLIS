@@ -100,7 +100,7 @@ def main(local_rank, cfg):
         # Load pretrained weights
         
         missing, unexpected = model_dict['denoiser'].load_state_dict(torch.load(cfg.ckpt_flow_path), strict=False)
-        print("Missing keys:", missing)
+        # print("Missing keys:", missing)
         print("Unexpected keys:", unexpected)
         model_dict['denoiser'].initialize_input_layer_x0h()
 
@@ -130,7 +130,7 @@ if __name__ == '__main__':
     ## config
     parser.add_argument('--config', type=str, default='/home/user/TRELLIS/configs/generation/ss_flow_img_dit_L_16l8_fp16_sdf_conditioned.json', required=False, help='Experint config file')
     ## io and resume
-    parser.add_argument('--output_dir', default='/home/user/TRELLIS/outputs/flow_conditioned_example', type=str, required=False, help='Output directory')
+    parser.add_argument('--output_dir', default='/home/user/TRELLIS/outputs/flow_conditioned_trial', type=str, required=False, help='Output directory')
     parser.add_argument('--load_dir', type=str, default='', help='Load directory, default to output_dir')
     parser.add_argument('--ckpt', type=str, default='latest', help='Checkpoint step to resume training, default to latest')
     parser.add_argument('--data_dir', type=str, default='/home/user/TRELLIS/datasets/Hands', help='Data directory')
@@ -146,7 +146,7 @@ if __name__ == '__main__':
     parser.add_argument('--master_port', type=str, default='12345', help='Port for distributed training')
     parser.add_argument('--freeze_encoder', action='store_true', help='Freeze encoder weights')
     parser.add_argument('--load_flow_weights', action='store_true', help='Freeze encoder weights')
-    parser.add_argument('--ckpt_flow_path', type=str, default='/home/user/TRELLIS/outputs/flow_outer_rim_140_pose_resume_1/ckpts/denoiser_ema0.9999_step0080000.pt', help='Path to flow ckpt to load weights from')
+    parser.add_argument('--ckpt_flow_path', type=str, default='/home/user/TRELLIS/outputs/flow_outer_rim_140_pose_resume_2/ckpts/denoiser_ema0.9999_step0120000.pt', help='Path to flow ckpt to load weights from')
     opt = parser.parse_args()
     # Hardcode for debug!!!
     # opt.load_flow_weights = True

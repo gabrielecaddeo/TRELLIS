@@ -170,6 +170,8 @@ class ModulatedTransformerCrossBlockConditioned(nn.Module):
         shift_window: Optional[Tuple[int, int, int]] = None,
         use_checkpoint: bool = False,
         use_rope: bool = False,
+        use_encoding_hand: bool = False,
+        use_weighted_attention: bool = False,
         qk_rms_norm: bool = False,
         qk_rms_norm_cross: bool = False,
         qkv_bias: bool = True,
@@ -177,12 +179,14 @@ class ModulatedTransformerCrossBlockConditioned(nn.Module):
     ):
         super().__init__()
         self.use_checkpoint = use_checkpoint
+        self.use_encoding_hand = use_encoding_hand
         self.share_mod = share_mod
         self.norm1 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
         self.norm2 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
         self.norm3 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
         self.norm_mask = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
-        self.norm_hand = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
+        if self.use_encoding_hand:
+            self.norm_hand = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
         self.self_attn = MultiHeadAttention(
             channels,
             num_heads=num_heads,
@@ -202,6 +206,7 @@ class ModulatedTransformerCrossBlockConditioned(nn.Module):
             attn_mode="full",
             qkv_bias=qkv_bias,
             qk_rms_norm=qk_rms_norm_cross,
+            use_weighted_attention=use_weighted_attention,
         )
         self.cross_attn_mask_hand = MultiHeadAttention(
             channels,
@@ -212,15 +217,23 @@ class ModulatedTransformerCrossBlockConditioned(nn.Module):
             qkv_bias=qkv_bias,
             qk_rms_norm=qk_rms_norm_cross,
         )
-        self.cross_attn_hand = MultiHeadAttention(
-            channels,
-            ctx_channels=ctx_channels,
-            num_heads=num_heads,
-            type="cross",
-            attn_mode="full",
-            qkv_bias=qkv_bias,
-            qk_rms_norm=qk_rms_norm_cross,
-        )
+        # Initialize cross-attention to zero
+        nn.init.zeros_(self.cross_attn_mask_hand.to_out.weight)
+        nn.init.zeros_(self.cross_attn_mask_hand.to_out.bias)
+        
+        if self.use_encoding_hand:
+            self.cross_attn_hand = MultiHeadAttention(
+                channels,
+                ctx_channels=ctx_channels,
+                num_heads=num_heads,
+                type="cross",
+                attn_mode="full",
+                qkv_bias=qkv_bias,
+                qk_rms_norm=qk_rms_norm_cross,
+            )
+            # Initialize cross-attention to zero
+            nn.init.zeros_(self.cross_attn_hand.to_out.weight)
+            nn.init.zeros_(self.cross_attn_hand.to_out.bias)
 
         self.mlp = FeedForwardNet(
             channels,
@@ -249,9 +262,10 @@ class ModulatedTransformerCrossBlockConditioned(nn.Module):
         h = self.norm_mask(x)
         h = self.cross_attn_mask_hand(h, context['mask_hand'])
         x = x + h
-        h = self.norm_hand(x)
-        h = self.cross_attn_hand(h, context['x0_hand'])
-        x = x + h
+        if self.use_encoding_hand:
+            h = self.norm_hand(x)
+            h = self.cross_attn_hand(h, context['x0_hand'])
+            x = x + h
         h = self.norm3(x)
         h = h * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
         h = self.mlp(h)

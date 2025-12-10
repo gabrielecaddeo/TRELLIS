@@ -13,7 +13,14 @@ from .base import Trainer
 from ..utils.general_utils import *
 from ..utils.dist_utils import *
 from ..utils import grad_clip_utils, elastic_utils
-
+def _total_grad_norm(params, norm_type=2.0):
+    grads = []
+    for p in params:
+        if p.grad is not None:
+            grads.append(p.grad.detach().norm(norm_type))
+    if not grads:
+        return torch.tensor(0.0, device=params[0].device)
+    return torch.norm(torch.stack(grads), norm_type)
 
 class BasicTrainer(Trainer):
     """
@@ -93,6 +100,10 @@ class BasicTrainer(Trainer):
             }
         else:
             self.training_models = self.models
+        for i, (name, p) in enumerate(self.training_models['denoiser'].named_parameters()):
+            if p.requires_grad == False:
+                print(i, name, p.requires_grad)
+
         import trellis
         # Build master params
         self.model_params = sum(
@@ -362,6 +373,43 @@ class BasicTrainer(Trainer):
                     loss, status = self.training_losses(**mb_data)
                     l = loss['loss'] / len(data_list)
 
+                    # if (
+                    #     self.is_master
+                    #     and i == 0
+                    #     and (self.step % 1 == 0)  # adjust frequency as you like
+                    #     and 'mse' in loss
+                    #     and 'ni_loss' in loss
+                    # ):
+                    #     # 1) mse-only gradient norm
+                    #     zero_grad(self.model_params)
+                    #     loss['mse'].backward(retain_graph=True)
+                    #     gn_mse = _total_grad_norm(self.model_params).item()
+
+                    #     # 2) lambda_ni * ni_loss-only gradient norm
+                    #     zero_grad(self.model_params)
+                    #     loss['ni_loss'].backward(retain_graph=True)
+                    #     gn_ni = _total_grad_norm(self.model_params).item()
+
+                    #     # 3) contact gradient norm
+                    #     zero_grad(self.model_params)
+                    #     loss['contact_loss'].backward(retain_graph=True)
+                    #     gn_con = _total_grad_norm(self.model_params).item()
+
+                    #     # Clear grads again before the real backward
+                    #     zero_grad(self.model_params)
+
+                    #     # Log to file (or print)
+                    #     debug_path = os.path.join(self.output_dir, "grad_debug.log")
+                    #     with open(debug_path, "a") as f:
+                    #         f.write(
+                    #             f"[Step {self.step}] mse_grad_norm={gn_mse:.4e}, "
+                    #             f"ni_grad_norm={gn_ni:.4e}, "
+                    #             f"cont_grad_norm={gn_con:.4e}, "
+                    #             f"mse={loss['mse'].item():.4e}, "
+                    #             f"ni_loss={loss['ni_loss'].item():.4e}, "
+                    #             f"contact_loss={loss['contact_loss'].item():.4e}\n"
+                    #         )
+
                     # print(f"\nStep {self.step}, batch {i+1}/{len(data_list)}, "
                     #         f"loss_l1: {loss['l1'].item():.5f}, "
                     #         f"loss_eikonal: {loss['eikonal'].item():.5f}, "
@@ -376,17 +424,18 @@ class BasicTrainer(Trainer):
                         scaled_l = l * (2 ** self.log_scale)
 
                         scaled_l.backward()
+
                         for name, p in self.training_models['denoiser'].named_parameters():
                             if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
                                 with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
-                                    f.write(f"NaN/Inf in gradient of denoiser param: {name} at step {self.step}\n")
+                                    f.write(f"NaN/Inf in gradient of decoder param: {name} at step {self.step}\n")
 
                     except Exception as e:
                         with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
                             f.write(f"[Step {self.step}] Backward failed with exception:\n{str(e)}\n")
-                            f.write(f"Loss value: {loss.item()}\n")
-                            f.write(f"logvar stats: {status['logvar_min']}, {status['logvar_max']}\n")
-                            f.write(f"mean stats: {status['mean_min']}, {status['mean_max']}\n")
+                            f.write(f"Loss value: {loss['loss'].item()}\n")
+                            # f.write(f"logvar stats: {status['logvar_min']}, {status['logvar_max']}\n")
+                            # f.write(f"mean stats: {status['mean_min']}, {status['mean_max']}\n")
                         # for name, p in self.training_models['denoiser'].named_parameters():
                         #         if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
                         #             with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:

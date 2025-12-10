@@ -199,7 +199,21 @@ class SparseStructureFlowModel(nn.Module):
 
         return h
 
-
+class ContactEncoder3D(nn.Module):
+    def __init__(self, c_in=2, c_out=8):
+        super().__init__()
+        def blk(ci, co, s):
+            return nn.Sequential(
+                nn.Conv3d(ci, co, 3, stride=s, padding=1),
+                nn.GroupNorm(min(8, max(1, co//2)), co),
+                nn.SiLU(True),
+            )
+        self.net = nn.Sequential(
+            blk(c_in, 16, s=2),  # 64->32
+            blk(16, 32, s=2),    # 32->16
+            blk(32, c_out, s=1),
+        )
+    def forward(self, x): return self.net(x)
 
 class SparseStructureFlowModelConditioned(nn.Module):
     def __init__(
@@ -217,6 +231,9 @@ class SparseStructureFlowModelConditioned(nn.Module):
         pe_mode: Literal["ape", "rope"] = "ape",
         use_fp16: bool = False,
         use_checkpoint: bool = False,
+        use_encoding_hand: bool = False,
+        use_weighted_attention: bool = False,
+        use_touch: bool = False,
         share_mod: bool = False,
         qk_rms_norm: bool = False,
         qk_rms_norm_cross: bool = False,
@@ -238,6 +255,8 @@ class SparseStructureFlowModelConditioned(nn.Module):
         self.qk_rms_norm = qk_rms_norm
         self.qk_rms_norm_cross = qk_rms_norm_cross
         self.dtype = torch.float16 if use_fp16 else torch.float32
+        self.use_touch = use_touch
+        self.use_encoding_hand = use_encoding_hand
 
         self.t_embedder = TimestepEmbedder(model_channels)
         if share_mod:
@@ -268,6 +287,8 @@ class SparseStructureFlowModelConditioned(nn.Module):
                 share_mod=share_mod,
                 qk_rms_norm=self.qk_rms_norm,
                 qk_rms_norm_cross=self.qk_rms_norm_cross,
+                use_encoding_hand=use_encoding_hand,
+                use_weighted_attention=use_weighted_attention
             )
             for _ in range(num_blocks)
         ])
@@ -275,6 +296,10 @@ class SparseStructureFlowModelConditioned(nn.Module):
         self.out_layer = nn.Linear(model_channels, out_channels * patch_size**3)
 
         self.mask_hand_embedder = nn.Linear(1, self.cond_channels)
+
+        if self.use_touch:
+            self.contact_encoder = ContactEncoder3D(c_in=2, c_out=in_channels)
+            self.fuse_x0_contact = nn.Conv3d(self.in_channels*2, self.in_channels, kernel_size=1)
 
         self.initialize_weights()
         if use_fp16:
@@ -331,7 +356,7 @@ class SparseStructureFlowModelConditioned(nn.Module):
         """
         self.input_layer_x0h.load_state_dict(self.input_layer.state_dict())
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, cond: dict) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, cond: dict, **kwargs) -> torch.Tensor:
         assert [*x.shape] == [x.shape[0], self.in_channels, *[self.resolution] * 3], \
                 f"Input shape mismatch, got {x.shape}, expected {[x.shape[0], self.in_channels, *[self.resolution] * 3]}"
         # Split cond into parts
@@ -345,24 +370,28 @@ class SparseStructureFlowModelConditioned(nn.Module):
             t_emb = self.adaLN_modulation(t_emb)
         t_emb = t_emb.type(self.dtype)
         h = h.type(self.dtype)
-        embedded_mask_hand = self.mask_hand_embedder(cond['mask_hand'].view(x.shape[0],-1,1))
         cond['cond'] = cond['cond'].type(self.dtype)
-        cond['mask_hand'] = embedded_mask_hand.type(self.dtype)
         cond['mask_obj'] = cond['mask_obj'].view(x.shape[0],-1,1).type(self.dtype)
+        embedded_mask_hand = self.mask_hand_embedder(cond['mask_hand'].view(x.shape[0],-1,1))
+        cond['mask_hand'] = embedded_mask_hand.type(self.dtype)
+        
         cond['cond_mask'] = cond['cond_mask'].type(self.dtype)
-        x0h = cond['x0_hand']               # [B, C, R, R, R]
-        x0h_patches = patchify(x0h, self.patch_size)
-        x0h_patches = x0h_patches.view(*x0h_patches.shape[:2], -1).permute(0, 2, 1).contiguous()
-        # Keep in mind that using the same linear layer could be problematic!
-        # If training is unstable, consider changes it by adding another linear layer, like:
-        #self.input_layer_x0h = nn.Linear(..., model_channels)
 
-        # Then, after loading pretrained weights:
-        #self.input_layer_x0h.load_state_dict(self.input_layer.state_dict())
+        if self.use_encoding_hand:
+            x0h = cond['x0_hand']               # [B, C, R, R, R]
+            if self.use_touch:
+                assert [*cond['touch'].shape] == [x.shape[0], 2, 64, 64, 64], \
+                    f"Touch input shape mismatch, got {cond['touch'].shape}, expected {[x.shape[0], 2, 64, 64, 64]}"
+                concat_feat = self.contact_encoder(cond['touch'])  # [B, C', R, R, R]
+                fused = torch.cat([x0h, concat_feat], dim=1)  # [B, C+C', R, R, R]
+                x0h = self.fuse_x0_contact(fused)  # [B, C, R, R, R]
 
-        # x0h_tokens = self.input_layer(x0h_patches)
-        x0h_tokens = self.input_layer_x0h(x0h_patches)
-        cond['x0_hand'] = x0h_tokens.type(self.dtype)  
+            
+            x0h_patches = patchify(x0h, self.patch_size)
+            x0h_patches = x0h_patches.view(*x0h_patches.shape[:2], -1).permute(0, 2, 1).contiguous()
+
+            x0h_tokens = self.input_layer_x0h(x0h_patches)
+            cond['x0_hand'] = x0h_tokens.type(self.dtype)  
 
         for block in self.blocks:
             h = block(h, t_emb, cond)
@@ -374,3 +403,7 @@ class SparseStructureFlowModelConditioned(nn.Module):
         h = unpatchify(h, self.patch_size).contiguous()
 
         return h
+
+
+
+

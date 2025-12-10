@@ -311,7 +311,14 @@ class ImageConditionedMixinRotationConditioned:
 
         cond_masked = pack['cond'] * pack['mask_obj']          # broadcast over channel dim → [3,H,W]
         pack['cond_mask'] = cond_masked
+        pack['frame_id'] = view
+        pack['instance'] = instance_name
 
+        contacts_indices = np.load(os.path.join(root, 'data_pose_norm', instance_name, 'contacts', instance_name + f'_f{view:03d}_contact_coords.npy'))
+        contact_grid = np.zeros((64,64,64), dtype=np.float32)
+        contact_grid[contacts_indices[:,0], contacts_indices[:,1], contacts_indices[:,2]] = 1.0
+        contact_sdf = np.load(os.path.join(root, 'data_pose_norm', instance_name, 'contacts', instance_name + f'_f{view:03d}_dist_to_contact.npy'))
+        pack['touch'] = torch.cat([torch.from_numpy(contact_grid).unsqueeze(0), torch.from_numpy(contact_sdf).unsqueeze(0)], dim=0)  #
         return pack
 
     

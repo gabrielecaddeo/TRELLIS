@@ -9,7 +9,7 @@ import os
 from easydict import EasyDict as edict
 
 from ..basic import BasicTrainer
-from ...pipelines import samplers 
+from ...pipelines import samplers
 from ...utils.general_utils import dict_reduce
 from .mixins.classifier_free_guidance import ClassifierFreeGuidanceMixin
 from .mixins.text_conditioned import TextConditionedMixin
@@ -19,7 +19,7 @@ from ... import models
 class FlowMatchingTrainer(BasicTrainer):
     """
     Trainer for diffusion model with flow matching objective.
-    
+
     Args:
         models (dict[str, nn.Module]): Models to train.
         dataset (torch.utils.data.Dataset): Dataset.
@@ -110,7 +110,7 @@ class FlowMatchingTrainer(BasicTrainer):
         Get the conditioning data.
         """
         return cond
-    
+
     def get_inference_cond(self, cond, **kwargs):
         """
         Get the conditioning data for inference.
@@ -122,7 +122,7 @@ class FlowMatchingTrainer(BasicTrainer):
         Get the sampler for the diffusion process.
         """
         return samplers.FlowEulerSampler(self.sigma_min)
-    
+
     def vis_cond(self, **kwargs):
         """
         Visualize the conditioning data.
@@ -165,7 +165,7 @@ class FlowMatchingTrainer(BasicTrainer):
         t = self.sample_t(x_0.shape[0]).to(x_0.device).float()
         x_t = self.diffuse(x_0, t, noise=noise)
         cond = self.get_cond(cond, **kwargs)
-        
+
         pred = self.training_models['denoiser'](x_t, t * 1000, cond, **kwargs)
         assert pred.shape == noise.shape == x_0.shape
         target = self.get_v(x_0, noise, t)
@@ -184,7 +184,7 @@ class FlowMatchingTrainer(BasicTrainer):
                 terms[f"bin_{i}"] = {"mse": mse_per_instance[time_bin == i].mean()}
 
         return terms, {}
-    
+
     @torch.no_grad()
     def run_snapshot(
         self,
@@ -232,14 +232,14 @@ class FlowMatchingTrainer(BasicTrainer):
             'value': lambda x: torch.cat(x, dim=0),
             'type': lambda x: x[0],
         }))
-        
+
         return sample_dict
 
-    
+
 class FlowMatchingTrainerConditioned(BasicTrainer):
     """
     Trainer for diffusion model with flow matching objective.
-    
+
     Args:
         models (dict[str, nn.Module]): Models to train.
         dataset (torch.utils.data.Dataset): Dataset.
@@ -287,9 +287,15 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         super().__init__(*args, **kwargs)
         self.t_schedule = t_schedule
         self.sigma_min = sigma_min
-        self.lambda_ni = kwargs.get('lambda_non_interpenetration', None)
         self.ss_dec_path = kwargs.get('ss_dec_path', None)
         self.ss_dec_ckpt = kwargs.get('ss_dec_ckpt', None)
+        self.lambda_ni_start = kwargs.get('lambda_non_interpenetration_start', None)
+        self.lambda_ni_max   = kwargs.get('lambda_non_interpenetration_max', None)
+        self.warmup_steps   = kwargs.get('lambda_non_interpenetration_warmup', None)
+        self.lambda_contact   = kwargs.get('lambda_contact', None)
+        self.use_touch    = kwargs.get('use_touch', True) 
+        self.use_encoding_hand    = kwargs.get('use_encoding_hand', True)
+        print(self.step)
         self._loading_ss_dec()
 
     def _loading_ss_dec(self):
@@ -304,6 +310,13 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         for p in self.ss_dec.parameters():
             p.requires_grad_(False)
 
+    def get_lambda_ni(self):
+        if self.step < self.warmup_steps:
+            alpha = self.step / self.warmup_steps
+            return self.lambda_ni_start + alpha * (self.lambda_ni_max - self.lambda_ni_start)
+        else:
+            return self.lambda_ni_max
+        
     def diffuse(self, x_0: torch.Tensor, t: torch.Tensor, noise: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Diffuse the data for a given number of diffusion steps.
@@ -346,7 +359,7 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         Get the conditioning data.
         """
         return cond, mask_hand, mask_obj, cond_mask
-    
+
     def get_inference_cond(self, cond, **kwargs):
         """
         Get the conditioning data for inference.
@@ -358,7 +371,7 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         Get the sampler for the diffusion process.
         """
         return samplers.FlowEulerSampler(self.sigma_min)
-    
+
     def vis_cond(self, **kwargs):
         """
         Visualize the conditioning data.
@@ -387,6 +400,7 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
             mask_hand=None,
             mask_obj=None,
             cond_mask=None,
+            touch=None,
             **kwargs
         ) -> Tuple[Dict, Dict]:
 
@@ -395,32 +409,53 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         x_t = self.diffuse(x_0, t, noise=noise)
 
         # Get (possibly CFG-dropped) conditions
-        cond_dict = self.get_cond(cond, mask_hand, mask_obj, cond_mask, x0_hand, **kwargs)
+        cond_dict = self.get_cond(cond, mask_hand, mask_obj, cond_mask, x0_hand, touch, **kwargs)
 
-        # Pass the whole dict to the denoiser (as you already do)
+        # Pass the whole dict to the denoget_condiser (as you already do)
         pred = self.training_models['denoiser'](x_t, t * 1000, cond_dict, **kwargs)
-        
+
         assert pred.shape == noise.shape == x_0.shape
         target = self.get_v(x_0, noise, t)
 
         terms = edict()
-        terms["mse"] = F.mse_loss(pred, target)
+        mse_loss_term = F.mse_loss(pred, target)
+        terms["mse"] = mse_loss_term
+        terms["loss"] = mse_loss_term
 
-        # Add non-interpenetration
-        x0_pred = (1 - self.sigma_min) * noise - pred
-        sdf_obj  = self.ss_dec(x0_pred)              # [B, 1, 64, 64, 64]
-        with torch.no_grad():
-            sdf_hand = self.ss_dec(x0_hand)          # [B, 1, 64, 64, 64]
+        if self.use_encoding_hand:
+            # Add non-interpenetration
+            x0_pred = (1 - self.sigma_min) * noise - pred
+            sdf_obj  = self.ss_dec(x0_pred)              # [B, 1, 64, 64, 64]
+            with torch.no_grad():
+                sdf_hand = self.ss_dec(x0_hand)          # [B, 1, 64, 64, 64]
 
-        obj_inside  = F.relu(-sdf_obj)
-        hand_inside = F.relu(-sdf_hand)
-        interpenetration = obj_inside * hand_inside      # [B, 1, 64,64,64]
-        ni_per_sample = interpenetration.view(interpenetration.shape[0], -1).sum(dim=1)
-        ni_loss = ni_per_sample.mean()
+            obj_inside  = F.relu(-sdf_obj)
+            hand_inside = F.relu(-sdf_hand)
+            interpenetration = obj_inside * hand_inside      # [B, 1, 64,64,64]
+            ni_per_sample = interpenetration.view(interpenetration.shape[0], -1).sum(dim=1)
+            ni_loss = ni_per_sample.mean()            # raw ni loss
+            lambda_ni = self.get_lambda_ni()          # scalar (float or 0-d tensor)
 
-        terms["ni_loss"] = ni_loss
+            terms["ni_loss"] = lambda_ni * ni_loss           # unweighted
 
-        terms["loss"] = terms["mse"] + self.lambda_ni * terms["ni_loss"]
+            terms["loss"] = terms["loss"] + lambda_ni * ni_loss
+
+
+            if self.use_touch:
+                contact_mask = touch[:, 0]                     # [B, 64, 64, 64], 0/1
+                contact_sdf  = contact_mask * sdf_obj.abs()    # [B, 64, 64, 64]
+
+                B = contact_sdf.shape[0]
+                num   = contact_sdf.view(B, -1).sum(dim=1)     # [B]
+                denom = contact_mask.view(B, -1).sum(dim=1)    # [B]
+                denom = denom.clamp_min(1)                     # avoid divide-by-zero
+
+                per_sample_loss = num / denom                  # [B]
+                contact_loss = per_sample_loss.mean()          # scalar
+
+                terms["contact_loss"] = contact_loss * self.lambda_contact # weight for contact loss
+
+                terms["loss"] += contact_loss * self.lambda_contact
 
         # time-bin logging unchanged
         mse_per_instance = np.array([
@@ -434,7 +469,7 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
 
         return terms, {}
 
-    
+
     @torch.no_grad()
     def run_snapshot(
         self,
@@ -455,14 +490,16 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         sample_gt = []
         sample = []
         cond_vis = []
-        #for i in range(0, num_samples, batch_size):
-        for i in range(0, 4, batch_size):
+        sample_hand = []
+        for i in range(0, num_samples, batch_size):
+        # for i in range(0, 4, batch_size):
             batch = min(batch_size, num_samples - i)
             data = next(iter(dataloader))
             data = {k: v[:batch].cuda() if isinstance(v, torch.Tensor) else v[:batch] for k, v in data.items()}
             noise = torch.randn_like(data['x_0'])
             sample_gt.append(data['x_0'])
             cond_vis.append(self.vis_cond(**data))
+            sample_hand.append(data['x0_hand'])
             del data['x_0']
             args = self.get_inference_cond(**data)
             res = sampler.sample(
@@ -475,22 +512,24 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
 
         sample_gt = torch.cat(sample_gt, dim=0)
         sample = torch.cat(sample, dim=0)
+        sample_hand = torch.cat(sample_hand, dim=0)
         sample_dict = {
             'sample_gt': {'value': sample_gt, 'type': 'sample'},
             'sample': {'value': sample, 'type': 'sample'},
+            'sample_hand': {'value': sample_hand, 'type': 'sample'},
         }
         sample_dict.update(dict_reduce(cond_vis, None, {
             'value': lambda x: torch.cat(x, dim=0),
             'type': lambda x: x[0],
         }))
-        
+
         return sample_dict
 
-   
+
 class FlowMatchingCFGTrainer(ClassifierFreeGuidanceMixin, FlowMatchingTrainer):
     """
     Trainer for diffusion model with flow matching objective and classifier-free guidance.
-    
+
     Args:
         models (dict[str, nn.Module]): Models to train.
         dataset (torch.utils.data.Dataset): Dataset.
@@ -528,7 +567,7 @@ class FlowMatchingCFGTrainer(ClassifierFreeGuidanceMixin, FlowMatchingTrainer):
 class FlowMatchingCFGTrainerConditioned(ClassifierFreeGuidanceMixin, FlowMatchingTrainerConditioned):
     """
     Trainer for diffusion model with flow matching objective and classifier-free guidance.
-    
+
     Args:
         models (dict[str, nn.Module]): Models to train.
         dataset (torch.utils.data.Dataset): Dataset.
@@ -567,7 +606,7 @@ class FlowMatchingCFGTrainerConditioned(ClassifierFreeGuidanceMixin, FlowMatchin
 class TextConditionedFlowMatchingCFGTrainer(TextConditionedMixin, FlowMatchingCFGTrainer):
     """
     Trainer for text-conditioned diffusion model with flow matching objective and classifier-free guidance.
-    
+
     Args:
         models (dict[str, nn.Module]): Models to train.
         dataset (torch.utils.data.Dataset): Dataset.
@@ -607,7 +646,7 @@ class TextConditionedFlowMatchingCFGTrainer(TextConditionedMixin, FlowMatchingCF
 class ImageConditionedFlowMatchingCFGTrainer(ImageConditionedMixin, FlowMatchingCFGTrainer):
     """
     Trainer for image-conditioned diffusion model with flow matching objective and classifier-free guidance.
-    
+
     Args:
         models (dict[str, nn.Module]): Models to train.
         dataset (torch.utils.data.Dataset): Dataset.
@@ -647,7 +686,7 @@ class ImageConditionedFlowMatchingCFGTrainer(ImageConditionedMixin, FlowMatching
 class ImageConditionedFlowMatchingCFGTrainerConditioned(ImageConditionedMixinConditioned, FlowMatchingCFGTrainerConditioned):
     """
     Trainer for image-conditioned diffusion model with flow matching objective and classifier-free guidance.
-    
+
     Args:
         models (dict[str, nn.Module]): Models to train.
         dataset (torch.utils.data.Dataset): Dataset.

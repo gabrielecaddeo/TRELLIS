@@ -204,8 +204,8 @@ class Trainer:
         data = recursive_to_device(data, self.device)
         vis= self.visualize_sample(data)
         if isinstance(vis, tuple):
-            vis = vis[0]
             sdf = vis[1]
+            vis = vis[0]
         if isinstance(vis, dict):
             save_cfg = [(f'dataset_{k}', v) for k, v in vis.items()]
         else:
@@ -242,7 +242,7 @@ class Trainer:
                     'value': samples[raw_key]['value'].detach().clone(),
                     'type': 'sdf'
                 }
-        
+        sdf = None
         # Preprocess images
         for key in list(samples.keys()):
             print(key)
@@ -250,8 +250,9 @@ class Trainer:
                 ## decomment for vae##
                 vis = self.visualize_sample(samples[key]['value'])
                 if isinstance(vis, tuple):
-                    vis = vis[0]
                     sdf = vis[1]
+                    vis = vis[0]
+                    
                 ## decomment for flow##
                 # vis, sdf = self.visualize_sample(samples[key]['value'])
                 if isinstance(vis, dict):
@@ -261,10 +262,12 @@ class Trainer:
                 else:
                     samples[key] = {'value': vis, 'type': 'image'}
                     ## Comment for vae##
-                    samples[f'{key}_sdf'] = {
-                    'value': sdf.detach().clone(),
-                    'type': 'sdf'
-                        }
+                    if sdf is not None:
+                        samples[f'{key}_sdf'] = {
+                        'value': sdf.detach().clone(),
+                        'type': 'sdf'
+                            }
+
         
 
 
@@ -389,6 +392,7 @@ class Trainer:
                     {k: v[i * batch_size // self.batch_split:(i + 1) * batch_size // self.batch_split] for k, v in data.items()}
                     for i in range(self.batch_split)
                 ]
+
         elif isinstance(data, list):
             data_list = data
         else:
@@ -454,15 +458,36 @@ class Trainer:
             data_list = self.load_data()
             try:
                 step_log = self.run_step(data_list)
+                if self.step % 100 == 0:
+                    print(f'Step {self.step} completed successfully.')
             except Exception as e:
-                print(f"⚠️ [Step {self.step}] Skipped due to exception: {e}")
-                for m in self.training_models.values():
-                    for p in m.parameters():
-                        if p.grad is not None:
-                            p.grad.detach_(); p.grad.zero_()
-                self.optimizer.zero_grad(set_to_none=True)
-                
-                continue
+                if dist.is_available() and dist.is_initialized():
+                    rank = dist.get_rank()
+                    world_size = dist.get_world_size()
+                else:
+                    rank = 0
+                    world_size = 1
+
+                device = torch.cuda.current_device() if torch.cuda.is_available() else None
+
+                # Collect instance names from the current batch
+                instance_names = [str(s.get('instance', '<no_instance_field>')) for s in data_list]
+
+                log_path = os.path.join(self.output_dir, f"debug_stuff_rank{rank}.log")
+                with open(log_path, "a") as f:
+                    f.write(f"\n[Step {self.step}] Exception during run_step on rank {rank}/{world_size}, device {device}:\n")
+                    f.write(f"  Exception: {repr(e)}\n")
+                    f.write(f"  Instances in batch ({len(instance_names)}):\n")
+                    for inst in instance_names:
+                        f.write(f"    - {inst}\n")
+
+                print(f"⚠️ [Step {self.step}] Exception during run_step on rank {rank}: {e}", flush=True)
+
+                # In DDP, don’t continue — let it crash so all ranks stop
+                if dist.is_available() and dist.is_initialized():
+                    raise
+                else:
+                    continue
             
 
             time_end = time.time()

@@ -186,7 +186,7 @@ class ImageConditionedMixinConditioned:
         patchtokens = F.layer_norm(features, features.shape[-1:])
         return patchtokens
         
-    def get_cond(self, cond, mask_hand, mask_obj, cond_mask, x0_hand, **kwargs):
+    def get_cond(self, cond, mask_hand, mask_obj, cond_mask, x0_hand, touch, **kwargs):
         """
         Get the conditioning data.
         """
@@ -203,6 +203,7 @@ class ImageConditionedMixinConditioned:
             "mask_obj":  mask_obj_enc,
             "cond_mask": cond_mask_enc,
             "x0_hand": x0_hand,
+            "touch": touch,
         }
 
         # Build the negative / unconditional versions
@@ -212,6 +213,7 @@ class ImageConditionedMixinConditioned:
             "mask_obj":  torch.zeros_like(mask_obj_enc),
             "cond_mask": torch.zeros_like(cond_mask_enc),
             "x0_hand": torch.zeros_like(x0_hand),
+            "touch": torch.zeros_like(touch),
         }
 
         # Call the CFG mixin: this will randomly choose, per batch item,
@@ -222,7 +224,7 @@ class ImageConditionedMixinConditioned:
         return cond_dict
 
     
-    def get_inference_cond(self, cond, mask_hand, mask_obj, cond_mask, x0_hand, **kwargs):
+    def get_inference_cond(self, cond, mask_hand, mask_obj, cond_mask, x0_hand, touch, **kwargs):
         """
         Get the conditioning data for inference.
         """
@@ -240,6 +242,7 @@ class ImageConditionedMixinConditioned:
             "mask_obj":  mask_obj_enc,
             "cond_mask": cond_mask_enc,
             "x0_hand": x0_hand,
+            "touch": touch,
         }
 
         # 3. Build the *negative/unconditional* versions
@@ -249,6 +252,7 @@ class ImageConditionedMixinConditioned:
             "mask_obj":  torch.zeros_like(mask_obj_enc),
             "cond_mask": torch.zeros_like(cond_mask_enc),
             "x0_hand": torch.zeros_like(x0_hand),
+            "touch": torch.zeros_like(touch),
         }
 
         # 4. Let the CFG mixin package this for the sampler

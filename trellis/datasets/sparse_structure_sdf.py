@@ -34,23 +34,18 @@ class SparseStructureSDF(StandardDatasetBase):
         
     def filter_metadata(self, metadata):
         stats = {}
-        metadata = metadata[metadata[f'voxelized']]
-        stats['Voxelized'] = len(metadata)
+        metadata = metadata[metadata[f'sdf']]
+        stats['sdf'] = len(metadata)
         metadata = metadata[metadata['aesthetic_score'] >= self.min_aesthetic_score]
         stats[f'Aesthetic score >= {self.min_aesthetic_score}'] = len(metadata)
         return metadata, stats
 
     def get_instance(self, root, instance):
-        position = utils3d.io.read_ply(os.path.join(root, 'voxels', f'{instance}.ply'))[0]
-        coords = ((torch.tensor(position) + 0.5) * self.resolution).int().contiguous()
-        ss = torch.zeros(1, self.resolution, self.resolution, self.resolution, dtype=torch.long)
-        ss[:, coords[:, 0], coords[:, 1], coords[:, 2]] = 1
-
         random_number = random.randint(0, 23)
         sdf = torch.tensor(np.load(os.path.join(root, 'data_pose', instance, 'sdfs', f'{instance}_f{random_number:03d}.npy')), dtype=torch.float32)
         sdf = torch.clamp(sdf, -2, 2)
         sdf = sdf.unsqueeze(0)
-        return {'ss': ss, 'sdf': sdf, 'instance': instance}
+        return {'sdf': sdf, 'instance': instance}
 
     @torch.no_grad()
     def visualize_sample(self, ss: Union[torch.Tensor, dict]):

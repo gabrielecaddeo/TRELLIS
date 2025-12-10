@@ -159,6 +159,7 @@ class MultiHeadAttentionWeighted(nn.Module):
         qkv_bias: bool = True,
         use_rope: bool = False,
         qk_rms_norm: bool = False,
+        use_weighted_attention: bool = True,
     ):
         super().__init__()
         assert channels % num_heads == 0
@@ -179,6 +180,7 @@ class MultiHeadAttentionWeighted(nn.Module):
         self.shift_window = shift_window
         self.use_rope = use_rope
         self.qk_rms_norm = qk_rms_norm
+        self.use_weighted_attention = use_weighted_attention
 
         if self._type == "self":
             self.to_qkv = nn.Linear(channels, channels * 3, bias=qkv_bias)
@@ -232,7 +234,7 @@ class MultiHeadAttentionWeighted(nn.Module):
                     k = self.k_rms_norm(k)
                     h = scaled_dot_product_attention(q, k, v)
             else:
-                if mask_weight is not None:
+                if self.use_weighted_attention:
                     k, v = kv.unbind(dim=2)
                     h = self.weighted_scaled_dot_product_attention(q, k, v, mask_weight)
                 else:
