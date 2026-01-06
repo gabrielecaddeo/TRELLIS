@@ -17,6 +17,11 @@ import json
 import skfmm
 import timeit
 from PIL import Image
+import signal
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
+from collections import deque
 
 # ---------- helpers (unit2 = [-1,1]) ----------
 def grid_centers_u2(res):
@@ -119,6 +124,37 @@ def occ_from_V_pose_u2(V_pose_u2, F, res=64):
             ijk = np.array([v.grid_index for v in vg.get_voxels()], dtype=int)
             occ[ijk[:,0], ijk[:,1], ijk[:,2]] = True
         return occ
+
+def normalize_to_unit2(V_raw, eps=1e-6):
+    # center at AABB center and scale uniformly so the largest dimension fits in [-1,1]
+    vmin = V_raw.min(axis=0)
+    vmax = V_raw.max(axis=0)
+    c    = 0.5 * (vmin + vmax)
+    ext  = (vmax - vmin).max()  # largest side of the AABB
+    if ext <= 0:
+        raise ValueError("Degenerate mesh: zero extent")
+    s = (2.0 - 2.0*eps) / ext   # fit *inside* [-1,1] with a tiny margin
+    V_u2 = (V_raw - c) * s
+    return V_u2, s, c
+
+def canonical_sdf_u2_norm(mesh_path, res0=128, do_normalize=True):
+    m = trimesh.load(mesh_path, force='mesh', process=False)
+    V_raw = m.vertices.view(np.ndarray).astype(np.float64)
+    F     = m.faces.view(np.ndarray).astype(np.int32)
+    # print("Pre-normalization AABB:", V_raw.min(0), V_raw.max(0))
+    if do_normalize:
+        V_u2, s_norm, c_norm = normalize_to_unit2(V_raw)  # now truly in [-1,1]^3
+    else:
+        # Only use this if you KNOW your input is already in unit2
+        V_u2 = np.clip(V_raw, -1 + 1e-6, 1 - 1e-6)
+        s_norm, c_norm = 1.0, np.zeros(3)
+    # print("Post-normalization AABB:", V_u2.min(0), V_u2.max(0))
+    level = 2.0/res0
+    sdf0_raw, _ = mesh2sdf.compute(V_u2, F, res0, fix=False, level=level, return_mesh=True)
+    sdf0 = np.asarray(sdf0_raw).reshape(res0, res0, res0)
+
+    # return normalization so you can record provenance if needed
+    return V_u2, F, sdf0, s_norm, c_norm
 
 # ---------- step 1: canonical high-res SDF ----------
 def canonical_sdf_u2(mesh_path, res0=128):
@@ -406,8 +442,9 @@ def pose2d_meta_from_occ(
 def save_voxelization_and_sdf(
     out_dir, name, occ, sdf, res=64,
     R_fixed=None, s_aug=None, t_aug=None, c0=None,
+    s_norm=None, c_norm=None,
     frame_id=None, margin_vox=1,
-    space="unitcube"  # "unitcube" -> [-0.5,0.5]^3 ; "unit2" -> [-1,1]^3
+    space="unit2"  # "unitcube" -> [-0.5,0.5]^3 ; "unit2" -> [-1,1]^3
 ):
     """
     Saves posed, ready-to-use data (no need to reapply transforms):
@@ -420,8 +457,8 @@ def save_voxelization_and_sdf(
     """
 
     # --- folders ---
-    os.makedirs(os.path.join(out_dir, "voxels"), exist_ok=True)
-    os.makedirs(os.path.join(out_dir, "occs"),   exist_ok=True)
+    #os.makedirs(os.path.join(out_dir, "voxels"), exist_ok=True)
+    #os.makedirs(os.path.join(out_dir, "occs"),   exist_ok=True)
     os.makedirs(os.path.join(out_dir, "sdfs"),   exist_ok=True)
     os.makedirs(os.path.join(out_dir, "idxs"),   exist_ok=True)
 
@@ -448,9 +485,9 @@ def save_voxelization_and_sdf(
     # --- write files ---
     # PLY of centers (already in posed grid coordinates)
     # expects utils3d.io.write_ply(path, Nx3 float32 array)
-    utils3d.io.write_ply(os.path.join(out_dir, "voxels", f"{name}.ply"), centers.astype(np.float32))
+    #utils3d.io.write_ply(os.path.join(out_dir, "voxels", f"{name}.ply"), centers.astype(np.float32))
 
-    np.save(os.path.join(out_dir, "occs", f"{name}.npy"), occ)
+    #np.save(os.path.join(out_dir, "occs", f"{name}.npy"), occ)
     np.save(os.path.join(out_dir, "sdfs", f"{name}.npy"), sdf)
     np.save(os.path.join(out_dir, "idxs", f"{name}.npy"), idx.astype(np.int32))
 
@@ -487,6 +524,12 @@ def save_voxelization_and_sdf(
             "sdf_min": float(sdf.min()),
             "sdf_max": float(sdf.max()),
             "sdf_mean": float(sdf.mean()),
+        },
+        "canonical": {
+            "do_normalize": True,
+            "s_norm": float(s_norm),
+            "c_norm": np.asarray(c_norm, dtype=float).tolist(),
+            "about": "x_norm = (x_raw - c_norm) * s_norm"
         },
         "pose2d_meta": image_info
     }
@@ -528,19 +571,20 @@ def post_adjustment_sdf_mod(instance_name, root, visualize=True, save_bool=False
         sdf_folder = os.path.join(save_folder, instance_name, "sdfs")
     list_jsons = sorted(glob.glob(os.path.join(save_folder, instance_name, '*.json')))
     # print(len(list_jsons))
-    #final_val=24                                                                                                                                                                                           
+    #final_val=24
     if len(list_jsons)==24:
-        print(f"  SDFs already exist for all frames, skipping: {instance_name}")
+        #print(f"  SDFs already exist for all frames, skipping: {instance_name}")
         return
     meta   = json.load(open(os.path.join(root, 'renders_cond', instance_name, 'transforms.json')))
     for frame_id in range(24):
         try:
 
             # start_time = timeit.default_timer()
-            V_u2, F, sdf0 = canonical_sdf_u2(ply_mesh_path, res0=64)   # 128 or 256 recommended
+            # V_u2, F, sdf0 = canonical_sdf_u2(ply_mesh_path, res0=64)   # 128 or 256 recommended
+            V_u2, F, sdf0, s_norm, c_norm = canonical_sdf_u2_norm(ply_mesh_path, res0=64)
 
             R_fixed = np.array(meta["frames"][frame_id]["transform_matrix"], dtype=float)[:3,:3]
-            V_pose_u2, s_aug, t_aug, c0 = sample_ST_no_clip_u2_xyOnly(V_u2, R_fixed, margin_vox=1, res=64, scale_range=(0.6,1.0))
+            V_pose_u2, s_aug, t_aug, c0 = sample_ST_no_clip_u2_xyOnly(V_u2, R_fixed, margin_vox=1, res=64, scale_range=(0.5,1.0))
 
             # 2) Resample canonical SDF into posed 64³
             phi, Y = resample_sdf_u2(sdf0, R_fixed, s_aug, t_aug, c0, target_res=64, order=3, cval=4.0)
@@ -554,9 +598,9 @@ def post_adjustment_sdf_mod(instance_name, root, visualize=True, save_bool=False
             dx = 2.0/64
             sdf = skfmm.distance(np.ma.MaskedArray(sdf, mask=np.zeros_like(sdf, dtype=bool)), dx=dx)
             # 5) (Optional) occupancy for visualization, from posed mesh in unit2
-            ss = occ_from_V_pose_u2(V_pose_u2, F, res=64) 
-            
-            ss = binary_fill_holes(ss)
+            ss = occ_from_V_pose_u2(V_pose_u2, F, res=64)
+
+            # ss = binary_fill_holes(ss)
 
             if save_bool:
                 _ = save_voxelization_and_sdf(
@@ -569,9 +613,12 @@ def post_adjustment_sdf_mod(instance_name, root, visualize=True, save_bool=False
                     s_aug      = s_aug,                             # sampled scale
                     t_aug      = t_aug,                             # sampled translation
                     c0         = c0,                                # center used for about-center transform
+                    s_norm= s_norm,                           # canonical normalization scale
+                    c_norm= c_norm,                           # canonical normalization center
                     frame_id   = frame_id,
                     margin_vox = 1,
                 )
+
                 print(f"Saved {instance_name}_f{frame_id:03d}", )
             if visualize:
 
@@ -726,20 +773,325 @@ def post_adjustment_sdf_mod(instance_name, root, visualize=True, save_bool=False
             print(f"  [ERROR] Failed to process {instance_name}: {e} (line {tb.lineno})")
 
 
+
+# def _worker(instance_path, root):
+#     instance_name = os.path.basename(instance_path)
+#     if instance_name in SKIP:
+#         return instance_name, "skipped"
+
+#     try:
+#         post_adjustment_sdf_mod(
+#             instance_name,
+#             root,
+#             save_bool=True,
+#             save_folder=os.path.join(root, "data_pose"),
+#             visualize=False,
+#         )
+#         return instance_name, "ok"
+#     except Exception as e:
+#         # Return error rather than crashing the whole pool
+#         return instance_name, f"error: {e}"
+
+SKIP = {
+    "2e35f84025d83fcd1d1eb082bbbd4dc8b991ab501d81eae7a8a710012a58e38a",
+    "118519d1320c7f18f2fad814d8d05337ac12f6d10e9e40946c40b60c94d36b25",
+    "6a9fc414a95022786e905694939ddee30f10bbc438153a10a7dc6dda11993a6f",
+    "56a370e60eebd93a0aeb9426c2636ce54172d1b212f979c23006c6ed902c58d2",
+    "27623ddea9ef189b888b60917c113724e5169bc690acc56b8293332b3729381f",
+    "348af3ce6e523d27e557f9b5b53ba5f6953af1595b67995a933fdea19e2cf523",
+    "2f54b1754daf4de74e791c0ca67220d84f7cde4ef3dfaadaab00a37d9dd1989f",
+    "40324e56315d7af575eec7b92bc581a85e72a4caeb03ce9f22ae25a3c340ae21",
+    "0c22903d7ee27d5b3ca11481d7ea68647e27cdd267eee621b9b4ee5a5bbd630c"
+    #"67f94729ae5b4a211b1a7db0444e29d2d098bc1e6fab356bb25afce98b702a16"
+}
+# def _init_worker():
+#     # Let the main process handle Ctrl+C; workers ignore SIGINT
+#     signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+# def _worker(instance_path, root):
+#     instance_name = os.path.basename(instance_path)
+#     if instance_name in SKIP:
+#         return instance_name, "skipped"
+
+#     post_adjustment_sdf_mod(
+#         instance_name,
+#         root,
+#         save_bool=True,
+#         save_folder=os.path.join(root, "data_pose"),
+#         visualize=False,
+#     )
+#     return instance_name, "ok"
+
+# def run_all(instances, root, max_workers=None):
+#     # On some platforms this helps avoid weird signal behavior
+#     try:
+#         mp.set_start_method("spawn")
+#     except RuntimeError:
+#         pass  # already set
+
+#     todo = [p for p in instances if os.path.basename(p) not in SKIP]
+
+#     ex = ProcessPoolExecutor(
+#         max_workers=max_workers,
+#         initializer=_init_worker,
+#     )
+
+#     futures = [ex.submit(_worker, p, root) for p in todo]
+
+#     try:
+#         for fut in as_completed(futures):
+#             name, status = fut.result()
+#             print(f"{name}: {status}", flush=True)
+
+#     except KeyboardInterrupt:
+#         print("\n^C received — cancelling pending tasks and terminating workers...", flush=True)
+#         # Cancel anything not started yet
+#         for f in futures:
+#             f.cancel()
+#         # Stop the pool immediately; don't wait
+#         ex.shutdown(wait=False, cancel_futures=True)
+#         # Belt-and-suspenders: kill any leftover children
+#         for child in mp.active_children():
+#             try:
+#                 child.kill()  # send SIGKILL
+#             except Exception:
+#                 pass
+#         raise SystemExit(130)
+
+#     except Exception as e:
+#         # Make sure we don't hang on other errors either
+#         ex.shutdown(wait=False, cancel_futures=True)
+#         raise
+
+#     else:
+#         ex.shutdown(wait=True)  # clean shutdown when all done
+
+
+# TIMEOUT_S = 900  # per-task wall time (optional)
+
+# def _init_worker():
+#     # keep Ctrl+C in main only and tame BLAS threads
+#     signal.signal(signal.SIGINT, signal.SIG_IGN)
+#     os.environ.setdefault("OMP_NUM_THREADS", "1")
+#     os.environ.setdefault("MKL_NUM_THREADS", "1")
+#     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+#     os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+# def _worker(instance_path, root):
+#     name = os.path.basename(instance_path)
+#     if name in SKIP:
+#         return name, "skipped"
+
+#     # Do the work; let exceptions propagate (we'll catch them in main)
+#     post_adjustment_sdf_mod(
+#         name,
+#         root,
+#         save_bool=True,
+#         save_folder=os.path.join(root, "data_pose"),
+#         visualize=False,
+#     )
+#     return name, "ok"
+
+
+# def process_all(instances, root, failures_path="failures.jsonl", successes_path="successes.txt", max_workers=None):
+#     try:
+#         mp.set_start_method("spawn")
+#     except RuntimeError:
+#         pass
+
+#     todo = [p for p in instances if os.path.basename(p) not in SKIP]
+
+#     # Ensure parent dirs exist if you pass something like logs/failures.jsonl
+#     os.makedirs(os.path.dirname(failures_path) or ".", exist_ok=True)
+#     os.makedirs(os.path.dirname(successes_path) or ".", exist_ok=True)
+
+#     f_fail = open(failures_path or "failures.jsonl", "a", buffering=1)
+#     f_ok   = open(successes_path or "successes.txt",  "a", buffering=1)
+
+#     def log_failure(name, err, tb):
+#         rec = {"instance": name, "error": repr(err), "traceback": tb}
+#         f_fail.write(json.dumps(rec) + "\n"); f_fail.flush()
+
+#     def log_success(name, status):
+#         f_ok.write(f"{name}\t{status}\n"); f_ok.flush()
+
+#     with ProcessPoolExecutor(max_workers=max_workers or (os.cpu_count() or 4),
+#                              initializer=_init_worker) as ex:
+#         futures = {ex.submit(_worker, p, root): os.path.basename(p) for p in todo}
+#         try:
+#             for fut in as_completed(futures):
+#                 name = futures[fut]
+#                 try:
+#                     res_name, status = fut.result(timeout=TIMEOUT_S)
+#                     log_success(res_name, status)
+#                     print(f"{res_name}: {status}", flush=True)
+#                 except Exception as e:
+#                     tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+#                     log_failure(name, e, tb)
+#                     print(f"{name}: ERROR -> {e}", flush=True)
+#         except KeyboardInterrupt:
+#             print("\n^C — cancelling pending tasks...", flush=True)
+#             for f in futures: f.cancel()
+#             ex.shutdown(wait=False, cancel_futures=True)
+#             for child in mp.active_children():
+#                 try: child.kill()
+#                 except Exception: pass
+#             raise SystemExit(130)
+#         finally:
+#             f_fail.close(); f_ok.close()
+
+# Per-task wall clock timeout (seconds). Tune to your workload.
+
+NPROC         = 32
+TIMEOUT_S     = 900          # per-item wall time; set 0/None to disable
+MAKTASKS      = 50           # tasks per worker before recycle (speed vs isolation)
+CHUNKSIZE     = 8            # batch items per IPC round
+MAX_RETRIES   = 1
+class _Timeout(Exception): pass
+
+def _init_pool():
+    # keep SIGINT in main; clamp BLAS threads
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+def _alarm_handler(signum, frame):
+    raise _Timeout()
+
+def _run_one(args):
+    """Worker: returns a structured dict for success or failure."""
+    instance_path, root = args
+    name = os.path.basename(instance_path)
+
+    # Optional quick prechecks
+    if name in SKIP:
+        return {"name": name, "status": "skipped"}
+    if not os.path.exists(instance_path):
+        return {"name": name, "status": "error", "exc_type": "FileNotFoundError",
+                "exc_msg": f"path not found: {instance_path}", "traceback": None}
+
+    # Set per-task timeout (Unix/macOS). On Windows, SIGALRM isn't available.
+    if TIMEOUT_S:
+        try:
+            signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.alarm(TIMEOUT_S)
+        except Exception:
+            pass  # platform without SIGALRM
+
+    try:
+        post_adjustment_sdf_mod(
+            name, root,
+            save_bool=True,
+            save_folder=os.path.join(root, "data_pose_norm"),
+            visualize=False,
+        )
+        return {"name": name, "status": "ok"}
+
+    except _Timeout:
+        return {"name": name, "status": "timeout", "exc_type": "Timeout",
+                "exc_msg": f">{TIMEOUT_S}s", "traceback": None}
+
+    except Exception as e:
+        # Capture full details
+        return {"name": name, "status": "error",
+                "exc_type": type(e).__name__,
+                "exc_msg": str(e),
+                "traceback": traceback.format_exc()}
+
+    finally:
+        try:
+            signal.alarm(0)
+        except Exception:
+            pass
+
+def process_all_fast(instances, root,
+                     failures_path="failures.jsonl",
+                     successes_path="successes.txt"):
+    ctx = mp.get_context("spawn")
+    todo = [(p, 0) for p in instances]  # (path, retries)
+
+    os.makedirs(os.path.dirname(failures_path) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(successes_path) or ".", exist_ok=True)
+
+    with open(failures_path, "a", buffering=1) as f_fail, \
+         open(successes_path, "a", buffering=1) as f_ok, \
+         ctx.Pool(processes=NPROC, initializer=_init_pool, maxtasksperchild=MAKTASKS) as pool:
+
+        def log_failure(rec):
+            f_fail.write(json.dumps(rec) + "\n"); f_fail.flush()
+
+        def log_success(name, status):
+            f_ok.write(f"{name}\t{status}\n"); f_ok.flush()
+
+        # submit all at once; chunking reduces IPC overhead
+        args = [(p, root) for p, _ in todo]
+        pending = pool.imap_unordered(_run_one, args, chunksize=CHUNKSIZE)
+
+        # map for retries
+        path_by_name = {os.path.basename(p): p for p, _ in todo}
+        retry_counts = {os.path.basename(p): r for p, r in todo}
+
+        for rec in pending:
+            name = rec["name"]
+            status = rec["status"]
+
+            if status in ("ok", "skipped"):
+                print(f"{name}: {status}", flush=True)
+                log_success(name, status)
+                continue
+
+            # Failure path: print meaningful info and log JSONL
+            exc_type = rec.get("exc_type")
+            exc_msg = rec.get("exc_msg")
+            print(f"{name}: {status} [{exc_type}] {exc_msg}", flush=True)
+            log_failure(rec)
+
+            # Retry logic (for transient errors)
+            tries = retry_counts.get(name, 0)
+            if tries < MAX_RETRIES:
+                retry_counts[name] = tries + 1
+                pool.apply_async(_run_one, ((path_by_name[name], root),),
+                                 callback=lambda r: pending._items.append(r))  # lightweight requeue
+
+
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Superimpose SDF and voxel grid.")
     parser.add_argument("--resolution", type=int, default=64, help="Resolution of the SDF grid.")
     parser.add_argument("--min_efficiency", type=float, default=0.15, help="Minimum bounding box efficiency for mesh density.")
     parser.add_argument("--pitch", type=float, default=0.01, help="Pitch for bounding box efficiency calculation.")
-    parser.add_argument("--root", type=str, default='/app/data/ABO', help="Root directory for instances.")
+    parser.add_argument("--root", type=str, default='/home/user/TRELLIS/datasets/ObjaverseXL_sketchfab', help="Root directory for instances.")
+
+    # SKIP = {
+    # "2e35f84025d83fcd1d1eb082bbbd4dc8b991ab501d81eae7a8a710012a58e38a",
+    # "118519d1320c7f18f2fad814d8d05337ac12f6d10e9e40946c40b60c94d36b25",
+    # }
 
     args = parser.parse_args()
 
-    resolution = args.resolution
-    print(f"Using resolution: {resolution}")
+    #resolution = args.resolution
+    #print(f"Using resolution: {resolution}")
     instances = glob.glob(os.path.join(args.root, "renders_cond") + "/*")
+    todo = [p for p in instances if os.path.basename(p) not in SKIP]
+    max_workers = 16
+    #run_all(instances, args.root, max_workers)
+    process_all_fast(instances, args.root, failures_path="bad_instances.jsonl", successes_path="done.txt")
 
 
-    for instance in instances:
-        instance_name = os.path.basename(instance)
-        post_adjustment_sdf_mod(instance_name, args.root, save_bool=True, save_folder=os.path.join(args.root,'data_pose'), visualize=False)
+    # with ProcessPoolExecutor(max_workers=max_workers) as ex:
+    #     futures = [ex.submit(_worker, p, args.root) for p in todo]
+    #     for fut in as_completed(futures):
+    #         name, status = fut.result()
+    #         print(f"{name}: {status}")
+    # for instance in todo:
+    #     instance_name = os.path.basename(instance)
+    # #     if instance_name == '38dae551176a8f8f2be3332fc249348684659e0ba87f88082d2b6dbd5770432c':
+    # #         post_adjustment_sdf_mod(instance_name, args.root, save_bool=True, save_folder=os.path.join(args.root,'data_pose_norm'), visualize=False)
+
+    #     # if instance_name =='2e35f84025d83fcd1d1eb082bbbd4dc8b991ab501d81eae7a8a710012a58e38a' or instance_name== '118519d1320c7f18f2fad814d8d05337ac12f6d10e9e40946c40b60c94d36b25':
+    #     #    continue
+    #     print(instance_name)
+    #     post_adjustment_sdf_mod(instance_name, args.root, save_bool=True, save_folder=os.path.join(args.root,'data_pose_norm'), visualize=False)
