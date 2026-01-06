@@ -100,9 +100,10 @@ class BasicTrainer(Trainer):
             }
         else:
             self.training_models = self.models
-        for i, (name, p) in enumerate(self.training_models['denoiser'].named_parameters()):
-            if p.requires_grad == False:
-                print(i, name, p.requires_grad)
+        if 'denoiser' in self.training_models:
+            for i, (name, p) in enumerate(self.training_models['denoiser'].named_parameters()):
+                if p.requires_grad == False:
+                    print(i, name, p.requires_grad)
 
         import trellis
         # Build master params
@@ -410,6 +411,10 @@ class BasicTrainer(Trainer):
                     #             f"contact_loss={loss['contact_loss'].item():.4e}\n"
                     #         )
 
+
+
+                    
+
                     # print(f"\nStep {self.step}, batch {i+1}/{len(data_list)}, "
                     #         f"loss_l1: {loss['l1'].item():.5f}, "
                     #         f"loss_eikonal: {loss['eikonal'].item():.5f}, "
@@ -424,8 +429,8 @@ class BasicTrainer(Trainer):
                         scaled_l = l * (2 ** self.log_scale)
 
                         scaled_l.backward()
-
-                        for name, p in self.training_models['denoiser'].named_parameters():
+                         
+                        for name, p in self.training_models['decoder'].named_parameters():
                             if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
                                 with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
                                     f.write(f"NaN/Inf in gradient of decoder param: {name} at step {self.step}\n")

@@ -2,7 +2,7 @@ from typing import *
 import copy
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import numpy as np
 import json
 import os
@@ -15,7 +15,7 @@ from .mixins.classifier_free_guidance import ClassifierFreeGuidanceMixin
 from .mixins.text_conditioned import TextConditionedMixin
 from .mixins.image_conditioned import ImageConditionedMixin, ImageConditionedMixinConditioned
 from ... import models
-
+# g = torch.Generator().manual_seed(42)
 class FlowMatchingTrainer(BasicTrainer):
     """
     Trainer for diffusion model with flow matching objective.
@@ -295,6 +295,7 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         self.lambda_contact   = kwargs.get('lambda_contact', None)
         self.use_touch    = kwargs.get('use_touch', True) 
         self.use_encoding_hand    = kwargs.get('use_encoding_hand', True)
+        self.snapshot_indices = None
         print(self.step)
         self._loading_ss_dec()
 
@@ -423,17 +424,27 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         terms["loss"] = mse_loss_term
 
         if self.use_encoding_hand:
-            # Add non-interpenetration
             x0_pred = (1 - self.sigma_min) * noise - pred
             sdf_obj  = self.ss_dec(x0_pred)              # [B, 1, 64, 64, 64]
             with torch.no_grad():
+                # Add non-interpenetration
                 sdf_hand = self.ss_dec(x0_hand)          # [B, 1, 64, 64, 64]
+            max_pen = 0.1  # clamp SDF to avoid very deep, noisy gradients
+            obj_inside  = torch.clamp(-sdf_obj, 0.0, max_pen)
+            hand_inside = torch.clamp(-sdf_hand, 0.0, max_pen)
 
-            obj_inside  = F.relu(-sdf_obj)
-            hand_inside = F.relu(-sdf_hand)
-            interpenetration = obj_inside * hand_inside      # [B, 1, 64,64,64]
-            ni_per_sample = interpenetration.view(interpenetration.shape[0], -1).sum(dim=1)
-            ni_loss = ni_per_sample.mean()            # raw ni loss
+            interpenetration = obj_inside * hand_inside  # [B, 1, D, H, W]
+
+            # mask of voxels that actually penetrate
+            pen_mask = (obj_inside > 0) & (hand_inside > 0)  # same shape
+
+            B = interpenetration.shape[0]
+            # sum over 3D dims
+            num  = (interpenetration * pen_mask).view(B, -1).sum(dim=1)      # [B]
+            den  = pen_mask.view(B, -1).sum(dim=1).clamp_min(1)             # [B], #penetrating voxels
+            ni_per_sample = num / den                                       # [B]
+            ni_loss = ni_per_sample.mean()
+
             lambda_ni = self.get_lambda_ni()          # scalar (float or 0-d tensor)
 
             terms["ni_loss"] = lambda_ni * ni_loss           # unweighted
@@ -477,13 +488,27 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         batch_size: int,
         verbose: bool = False,
     ) -> Dict:
+        
+        if self.snapshot_indices is None:
+            g = torch.Generator().manual_seed(1234)  # or choose your favourite seed
+            self.snapshot_indices = torch.randperm(len(self.dataset), generator=g)[:num_samples]
+
+        indices = self.snapshot_indices[:num_samples]
+
+        # make a copy of the dataset and put it in inference mode
+        base_dataset = copy.deepcopy(self.dataset)
+        base_dataset.inference = True
+
+        snapshot_dataset = Subset(base_dataset, indices)
+
         dataloader = DataLoader(
-            copy.deepcopy(self.dataset),
+            snapshot_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=0,
             collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
         )
+
 
         # inference
         sampler = self.get_sampler()
@@ -491,10 +516,12 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         sample = []
         cond_vis = []
         sample_hand = []
+        loader_iter = iter(dataloader)
         for i in range(0, num_samples, batch_size):
         # for i in range(0, 4, batch_size):
             batch = min(batch_size, num_samples - i)
-            data = next(iter(dataloader))
+            data = next(loader_iter)
+            
             data = {k: v[:batch].cuda() if isinstance(v, torch.Tensor) else v[:batch] for k, v in data.items()}
             noise = torch.randn_like(data['x_0'])
             sample_gt.append(data['x_0'])

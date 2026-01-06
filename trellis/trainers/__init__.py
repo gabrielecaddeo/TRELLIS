@@ -7,6 +7,7 @@ __attributes = {
     'SparseStructureVaeSDFTrainer': 'vae.sparse_structure_vae_sdf',
     
     'SLatVaeGaussianTrainer': 'vae.structured_latent_vae_gaussian',
+    'SLatVaeGaussianTrainerPose': 'vae.structured_latent_vae_gaussian_pose',
     'SLatVaeRadianceFieldDecoderTrainer': 'vae.structured_latent_vae_rf_dec',
     'SLatVaeMeshDecoderTrainer': 'vae.structured_latent_vae_mesh_dec',
     
@@ -49,7 +50,7 @@ if __name__ == '__main__':
     from .vae.sparse_structure_vae import SparseStructureVaeTrainer
     from .vae.sparse_structure_vae_sdf import SparseStructureVaeSDFTrainer
 
-    from .vae.structured_latent_vae_gaussian import SLatVaeGaussianTrainer
+    from .vae.structured_latent_vae_gaussian import SLatVaeGaussianTrainer, SLatVaeGaussianTrainerPose
     from .vae.structured_latent_vae_rf_dec import SLatVaeRadianceFieldDecoderTrainer
     from .vae.structured_latent_vae_mesh_dec import SLatVaeMeshDecoderTrainer
     
