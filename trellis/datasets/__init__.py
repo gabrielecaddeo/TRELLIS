@@ -19,6 +19,8 @@ __attributes = {
     'SLat': 'structured_latent',
     'TextConditionedSLat': 'structured_latent',
     'ImageConditionedSLat': 'structured_latent',
+
+    'TestDatasetConditioned': 'test_dataset',
 }
 
 __submodules = []
@@ -43,6 +45,7 @@ def __getattr__(name):
 if __name__ == '__main__':
     from .sparse_structure import SparseStructure
     from .sparse_structure_sdf import SparseStructureSDF
+    from .test_dataset import TestDatasetConditioned
     
     from .sparse_feat2render import SparseFeat2Render
     from .structured_latent2render import (

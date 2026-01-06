@@ -244,6 +244,158 @@ class FlowEulerSampler(Sampler):
         ret.samples = x.detach()
         return ret
     
+    def sample_velocity_conditioned(
+        self,
+        model,
+        noise,                         # latent init: [B, 8, 16, 16, 16]
+        decoder,                       # frozen decoder: latent -> SDF [B, 1, 64, 64, 64]
+        cond: dict | None = None,      # your conditioning (masks etc.)
+        steps: int = 50,
+        rescale_t: float = 1.0,
+        alpha_vel: float = 500,            # physics guidance strength
+        delta: float = 2.0,            # contact band (voxels); set 0 to disable
+        beta: float = 0.0,             # contact guidance weight (0 = off)
+        save_path: str | None = None,  # where to torch.save the final SDF (optional)
+        verbose: bool = True,
+        **kwargs
+    ):
+        """
+        Guided Euler sampling: at each step, nudge the vector field with the
+        gradient of a physics energy computed via the *frozen* decoder.
+
+        Returns:
+            {"samples": latent, "final_sdf": sdf}
+        """
+        # --- setup ---
+        # ---- 0. Setup & extract needed pieces ----
+        model.eval()
+        decoder.eval()
+
+        # we do NOT want to train model/decoder weights during sampling
+        for p in model.parameters():
+            p.requires_grad_(False)
+        for p in decoder.parameters():
+            p.requires_grad_(False)
+
+        # unpack condition bundle
+        cond = cond or {}
+        pos_cond = cond.get("cond",   None)      # positive CFG cond dict
+        neg_cond = cond.get("neg_cond", None)    # negative CFG cond dict
+        x0_hand  = pos_cond.get("x0_hand", None)     # latent for hand
+        touch    = pos_cond.get("touch",   None)     # [B, 1, 64, 64, 64] contact mask
+
+        # precompute sdf_hand ONCE (no grad wrt hand)
+        if x0_hand is not None:
+            with torch.no_grad():
+                sdf_hand = decoder(x0_hand)     # [B, 1, 64, 64, 64]
+                torch.save(sdf_hand, '/home/user/TRELLIS/coords_asym_velocity/hand_sdf.pt')
+        else:
+            sdf_hand = None
+
+        # time schedule (same as your sample())
+        t_seq = np.linspace(1.0, 0.0, steps + 1)
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = [(float(t_seq[i]), float(t_seq[i + 1])) for i in range(steps)]
+
+        # working latent
+        x = noise.detach().clone()
+        
+        ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+        
+        lambda_inter = 500
+        lambda_contact = 50
+        for step_i, (t, t_prev) in enumerate(t_pairs):
+            save_path=f'/home/user/TRELLIS/coords_asym_velocity/sdf_{step_i}.pt'
+            guidance_on = (step_i >= 15)
+            # 1) base vector field v_theta(x,t | cond)
+            with torch.no_grad():
+                v = self._inference_model(model, x, t, pos_cond, neg_cond, **kwargs)  # shape = x
+            if guidance_on:
+                x = x.detach().requires_grad_(True)  # grads w.r.t. x
+                pred_x_0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
+
+                # ---- 2) build E_sdf(x) ~ lambda_ni * ni_loss + lambda_contact * contact_loss ----
+                E = x.new_zeros([])
+                sdf_obj = decoder(pred_x_0)              # [B, 1, 64, 64, 64] (requires grad wrt x)
+                # save intermediate SDFs for visualization/debugging
+                if save_path is not None:
+                    torch.save(sdf_obj, save_path)
+                obj_inside  = torch.clamp(-sdf_obj,  0.0, 0.1)
+                hand_inside = torch.clamp(-sdf_hand, 0.0, 0.1)                                  # [B, 1, 64, 64, 64]
+                interpenetration = obj_inside * hand_inside
+                pen_mask = (obj_inside > 0) & (hand_inside > 0)
+
+                B = interpenetration.shape[0]
+                num = (interpenetration * pen_mask).view(B, -1).sum(dim=1)
+                den = pen_mask.view(B, -1).sum(dim=1).clamp_min(1)
+                ni_per_sample = num / den
+                ni_loss = ni_per_sample.mean()
+
+                E = E + lambda_inter * ni_loss
+                contact_mask = touch[:, 0]                 # [B, 64, 64, 64]
+                contact_sdf  = contact_mask * sdf_obj.abs()
+
+                B = contact_sdf.shape[0]
+                num   = contact_sdf.view(B, -1).sum(dim=1)
+                denom = contact_mask.view(B, -1).sum(dim=1).clamp_min(1)
+
+                per_sample_loss = num / denom
+                contact_loss = per_sample_loss.mean()
+
+                E = E + lambda_contact * contact_loss
+                # print('Loss'E_inter.item())
+                # 3) physics gradient w.r.t. latent
+                
+                g = torch.autograd.grad(E, x, retain_graph=False, create_graph=False)[0]
+            else:
+                # no physics term active
+                pred_x_0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
+                g = torch.zeros_like(x)
+            
+            # with torch.no_grad():
+            #     pen_vox = pen_mask.sum().item()
+            #     touch_vox = touch[:,0].sum().item() if touch is not None else -1
+            # print(f"pen_vox={pen_vox}, touch_vox={touch_vox}, ni_loss={ni_loss.item():.3e}, contact={contact_loss.item():.3e}")
+            # if verbose:
+            #     # this is useful for checking stability
+            #     g_mean = g.abs().mean().item()
+            #     g_max  = g.abs().max().item()
+            #     print("alpha_vel", alpha_vel, type(alpha_vel))
+            #     print("v_abs_max", v.abs().max().item(), "g_abs_max", g.abs().max().item())
+
+            #     print(f"t={t:.4f}, E={E.item():.4e}, |g|_mean={g_mean:.4e}, |g|_max={g_max:.4e}")
+
+            # ---- 4) guided Euler update: x_{t-Δ} = x_t + Δt * (v - α ∇E) ----
+            dt =  t-t_prev   # note: t_prev < t, so dt is negative
+            with torch.no_grad():
+                x = x - dt * (v + alpha_vel * g)
+
+            ret.pred_x_t.append(x.detach())
+            ret.pred_x_0.append(pred_x_0.detach())
+
+            v_step = (dt * v).norm().item()
+            g_step = (dt * alpha_vel * g).norm().item()
+            x_norm = x.norm().item()
+
+            print(f"dt={dt:.4f} |x|={x_norm:.3e} |dt*v|={v_step:.3e} |dt*alpha*g|={g_step:.3e} ratio={g_step/(v_step+1e-12):.3e}")
+            print("finite after update?", torch.isfinite(x).all().item(), "max|x|", x.abs().max().item())
+            print("pred_x_0.requires_grad", pred_x_0.requires_grad)
+            # print("sdf_obj.requires_grad", sdf_obj.requires_grad)
+            # print("E.requires_grad", E.requires_grad)
+            if verbose and (not torch.isfinite(x).all()):
+                print("Warning: non-finite values in x during guided Euler.")
+                # you might want to break or clamp here in practice
+        
+        # decode final SDF once
+        with torch.no_grad():
+            final_sdf = decoder(x)
+        save_path='/home/user/TRELLIS/coords_asym_velocity/final_sdf.pt'
+        if save_path is not None:
+            torch.save(final_sdf, save_path)
+            
+        ret.samples = x.detach()
+        return ret
+    
     def sample_optimization(
         self,
         model,
@@ -605,6 +757,44 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSa
         """
         print('inside')
         return super().sample_velocity(model, noise, decoder, hand_sdf, cond, steps, rescale_t, verbose, neg_cond=neg_cond, cfg_strength=cfg_strength, cfg_interval=cfg_interval, **kwargs)
+    
+
+    def sample_velocity_conditioned(
+        self,
+        model,
+        noise,
+        decoder,
+        cond,
+        steps: int = 50,
+        rescale_t: float = 1.0,
+        cfg_strength: float = 3.0,
+        cfg_interval: Tuple[float, float] = (0.0, 1.0),
+        verbose: bool = True,
+        **kwargs
+    ):
+        """
+        Generate samples from the model using Euler method.
+        
+        Args:
+            model: The model to sample from.
+            noise: The initial noise tensor.
+            cond: conditional information.
+            neg_cond: negative conditional information.
+            steps: The number of steps to sample.
+            rescale_t: The rescale factor for t.
+            cfg_strength: The strength of classifier-free guidance.
+            cfg_interval: The interval for classifier-free guidance.
+            verbose: If True, show a progress bar.
+            **kwargs: Additional arguments for model_inference.
+
+        Returns:
+            a dict containing the following
+            - 'samples': the model samples.
+            - 'pred_x_t': a list of prediction of x_t.
+            - 'pred_x_0': a list of prediction of x_0.
+        """
+        print('inside')
+        return super().sample_velocity_conditioned(model, noise, decoder, cond, steps, rescale_t, cfg_strength=cfg_strength, cfg_interval=cfg_interval, **kwargs)
 
 
 # ==============================================================================

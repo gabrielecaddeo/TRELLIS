@@ -254,6 +254,7 @@ class ImageConditionedMixinRotationConditioned:
     def __init__(self, roots, *, image_size=518, **kwargs):
         self.image_size = image_size
         super().__init__(roots, **kwargs)
+        self.inference = False
     
     def filter_metadata(self, metadata):
         metadata, stats = super().filter_metadata(metadata)
@@ -266,7 +267,10 @@ class ImageConditionedMixinRotationConditioned:
         with open(os.path.join(image_root, 'transforms.json')) as f:
             meta_all = json.load(f)
 
-        view = np.random.randint(len(meta_all['frames']))
+        if self.inference:
+            view = 0
+        else:
+            view = np.random.randint(len(meta_all['frames']))
         fr   = meta_all['frames'][view]
         image_path = os.path.join(image_root, fr['file_path'])
         image_rgba = Image.open(image_path).convert('RGBA')
@@ -274,7 +278,7 @@ class ImageConditionedMixinRotationConditioned:
         mask_hand_path = os.path.join(image_root, f"{view:03d}_mask_1.png")
         mask_obj_path  = os.path.join(image_root, f"{view:03d}_mask_2.png")
 
-        pack = super().get_instance(root, instance_name, view)
+        pack = super().get_instance(root, instance_name, view) ## Get the latent data
 
         posed_name = f"{instance_name}_f{view:03d}"
         with open(os.path.join(root, 'data_pose_norm', instance_name, f"{posed_name}_meta.json")) as f:
