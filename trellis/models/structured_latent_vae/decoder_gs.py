@@ -92,7 +92,7 @@ class SLatGaussianDecoder(SparseTransformerBase):
         for i in range(x.shape[0]):
             representation = Gaussian(
                 sh_degree=0,
-                aabb=[-0.5, -0.5, -0.5, 1.0, 1.0, 1.0],
+                aabb=[-1.0, -1.0, -1.0, 2.0, 2.0, 2.0],
                 mininum_kernel_size = self.rep_config['3d_filter_kernel_size'],
                 scaling_bias = self.rep_config['scaling_bias'],
                 opacity_bias = self.rep_config['opacity_bias'],
