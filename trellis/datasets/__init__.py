@@ -3,11 +3,14 @@ import importlib
 __attributes = {
     'SparseStructure': 'sparse_structure',
     'SparseStructureSDF': 'sparse_structure_sdf',
-    
+
     'SparseFeat2Render': 'sparse_feat2render',
+    'SparseFeat2RenderPose': 'sparse_feat2render',
     'SLat2Render':'structured_latent2render',
     'Slat2RenderGeo':'structured_latent2render',
-    
+    'SLat2RenderPose':'structured_latent2render',
+    'Slat2RenderGeoPose':'structured_latent2render',
+
     'SparseStructureLatent': 'sparse_structure_latent',
     'SparseStructureLatentSDF': 'sparse_structure_latent',
     'SparseStructureLatentSDFConditioned': 'sparse_structure_latent',
@@ -15,7 +18,7 @@ __attributes = {
     'ImageConditionedSparseStructureLatent': 'sparse_structure_latent',
     'ImageConditionedSparseStructureLatentSDF': 'sparse_structure_latent',
     'ImageConditionedSparseStructureLatentSDFConditioned': 'sparse_structure_latent',
-    
+
     'SLat': 'structured_latent',
     'TextConditionedSLat': 'structured_latent',
     'ImageConditionedSLat': 'structured_latent',
@@ -38,7 +41,7 @@ def __getattr__(name):
             globals()[name] = module
         else:
             raise AttributeError(f"module {__name__} has no attribute {name}")
-    
+
     return globals()[name]
 
 # For Pylance
@@ -46,13 +49,15 @@ if __name__ == '__main__':
     from .sparse_structure import SparseStructure
     from .sparse_structure_sdf import SparseStructureSDF
     from .test_dataset import TestDatasetConditioned
-    
-    from .sparse_feat2render import SparseFeat2Render
+
+    from .sparse_feat2render import SparseFeat2Render, SparseFeat2RenderPose
     from .structured_latent2render import (
         SLat2Render,
         Slat2RenderGeo,
+        SLat2RenderPose,
+        Slat2RenderGeoPose,
     )
-    
+
     from .sparse_structure_latent import (
         SparseStructureLatent,
         SparseStructureLatentSDF,
@@ -62,10 +67,9 @@ if __name__ == '__main__':
         ImageConditionedSparseStructureLatentSDF,
         ImageConditionedSparseStructureLatentSDFConditioned,
     )
-    
+
     from .structured_latent import (
         SLat,
         TextConditionedSLat,
         ImageConditionedSLat,
     )
-    

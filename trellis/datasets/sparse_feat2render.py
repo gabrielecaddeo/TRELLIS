@@ -85,6 +85,8 @@ class SparseFeat2Render(StandardDatasetBase):
         feats = torch.tensor(feats['patchtokens']).float()
         
         if self.resolution != DATA_RESOLUTION:
+            print('INSD')
+            exit(0)
             factor = DATA_RESOLUTION // self.resolution
             coords = coords // factor
             coords, idx = coords.unique(return_inverse=True, dim=0)
@@ -205,6 +207,8 @@ class SparseFeat2RenderPose(StandardDatasetBase):
             "c0":    torch.tensor(pose["c0"]).float(),           # (3,)
             "s_norm": torch.tensor(can["s_norm"]).float(),       # ()
             "c_norm": torch.tensor(can["c_norm"]).float(),       # (3,)
+            "origin": torch.tensor(meta['grid']["origin"]).float(),       # (3,)
+            "voxel_size": torch.tensor(meta['grid']["voxel_size"]).float(), # ()
         }
         return coords, feats, count, pose_params
 
@@ -216,11 +220,53 @@ class SparseFeat2RenderPose(StandardDatasetBase):
         count  = torch.tensor(pack["count"]).int() if "count" in pack.files else None
         return coords, feats, count
 
+    def filter_metadata(self, metadata):
+        stats = {}
+        metadata = metadata[metadata[f'feature_{self.model}']]
+        stats['With features'] = len(metadata)
+        metadata = metadata[metadata['aesthetic_score'] >= self.min_aesthetic_score]
+        stats[f'Aesthetic score >= {self.min_aesthetic_score}'] = len(metadata)
+        metadata = metadata[metadata['num_voxels'] <= self.max_num_voxels]
+        stats[f'Num voxels <= {self.max_num_voxels}'] = len(metadata)
+        return metadata, stats
+    
+    @torch.no_grad()
+    def visualize_sample(self, sample: dict):
+        return sample['image']
+
+    def _get_image(self, root, instance):
+        with open(os.path.join(root, 'renders', instance, 'transforms.json')) as f:
+            metadata = json.load(f)
+        n_views = len(metadata['frames'])
+        view = np.random.randint(n_views)
+        metadata = metadata['frames'][view]
+        fov = metadata['camera_angle_x']
+        intrinsics = utils3d.torch.intrinsics_from_fov_xy(torch.tensor(fov), torch.tensor(fov))
+        c2w = torch.tensor(metadata['transform_matrix'])
+        c2w[:3, 1:3] *= -1
+        extrinsics = torch.inverse(c2w)
+
+        image_path = os.path.join(root, 'renders', instance, metadata['file_path'])
+        image = Image.open(image_path)
+        alpha = image.getchannel(3)
+        image = image.convert('RGB')
+        image = image.resize((self.image_size, self.image_size), Image.Resampling.LANCZOS)
+        alpha = alpha.resize((self.image_size, self.image_size), Image.Resampling.LANCZOS)
+        image = torch.tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
+        alpha = torch.tensor(np.array(alpha)).float() / 255.0
+        
+        return {
+            'image': image,
+            'alpha': alpha,
+            'extrinsics': extrinsics,
+            'intrinsics': intrinsics,
+        }
+
     def _get_feat(self, root, instance):
         DATA_RES = 64
         assert self.resolution <= DATA_RES and (DATA_RES % self.resolution == 0)
 
-        use_vanilla = (not self.use_pose) or (self.vanilla_mix_prob > 0 and np.random.rand() < self.vanilla_mix_prob)
+        use_vanilla = (not self.use_pose_features) or (self.vanilla_mix_prob > 0 and np.random.rand() < self.vanilla_mix_prob)
 
         pose_params = None
         if use_vanilla:
@@ -229,6 +275,7 @@ class SparseFeat2RenderPose(StandardDatasetBase):
             tags = self._list_pose_tags(root, instance)
             pose_tag = self._pick_pose_tag(tags)
             if pose_tag is None:
+                print()
                 coords, feats, count = self._load_vanilla_pack(root, instance)
             else:
                 coords, feats, count, pose_params = self._load_pose_pack(root, instance, pose_tag)
@@ -240,6 +287,8 @@ class SparseFeat2RenderPose(StandardDatasetBase):
 
         # downsample if needed (same as your old code)
         if self.resolution != DATA_RES:
+            print('INSD')
+            exit(0)
             factor = DATA_RES // self.resolution
             coords = coords // factor
             coords_u, inv = coords.unique(return_inverse=True, dim=0)
@@ -295,12 +344,19 @@ class SparseFeat2RenderPose(StandardDatasetBase):
         I3 = torch.eye(3)
         z3 = torch.zeros(3)
         one = torch.tensor(1.0)
+        origin_default = torch.tensor([-1.0, -1.0, -1.0])
+        voxel_default  = torch.tensor(2.0 / 64)   # careful: collate_fn is static; pass resolution in or store it
+
         pack["R_row"]  = stack_param("R_row", I3)     # (B,3,3)
         pack["s_aug"]  = stack_param("s_aug", one)    # (B,)
         pack["t_aug"]  = stack_param("t_aug", z3)     # (B,3)
         pack["c0"]     = stack_param("c0",  z3)       # (B,3)
         pack["s_norm"] = stack_param("s_norm", one)   # (B,)
         pack["c_norm"] = stack_param("c_norm", z3)    # (B,3)
+        pack['origin'] = stack_param("origin", origin_default)    # alias for convenience
+        pack['voxel_size'] = stack_param("voxel_size", voxel_default)  # alias for convenience
+        
+
 
         return pack
 

@@ -7,9 +7,10 @@ __attributes = {
     'SparseStructureVaeSDFTrainer': 'vae.sparse_structure_vae_sdf',
     
     'SLatVaeGaussianTrainer': 'vae.structured_latent_vae_gaussian',
-    'SLatVaeGaussianTrainerPose': 'vae.structured_latent_vae_gaussian_pose',
+    'SLatVaeGaussianTrainerPose': 'vae.structured_latent_vae_gaussian',
     'SLatVaeRadianceFieldDecoderTrainer': 'vae.structured_latent_vae_rf_dec',
     'SLatVaeMeshDecoderTrainer': 'vae.structured_latent_vae_mesh_dec',
+    'SLatVaeMeshDecoderTrainerPose': 'vae.structured_latent_vae_mesh_dec',
     
     'FlowMatchingTrainer': 'flow_matching.flow_matching',
     'FlowMatchingTrainerConditioned': 'flow_matching.flow_matching',
@@ -52,7 +53,7 @@ if __name__ == '__main__':
 
     from .vae.structured_latent_vae_gaussian import SLatVaeGaussianTrainer, SLatVaeGaussianTrainerPose
     from .vae.structured_latent_vae_rf_dec import SLatVaeRadianceFieldDecoderTrainer
-    from .vae.structured_latent_vae_mesh_dec import SLatVaeMeshDecoderTrainer
+    from .vae.structured_latent_vae_mesh_dec import SLatVaeMeshDecoderTrainer, SLatVaeMeshDecoderTrainerPose
     
     from .flow_matching.flow_matching import (
         FlowMatchingTrainer, FlowMatchingTrainerConditioned,
