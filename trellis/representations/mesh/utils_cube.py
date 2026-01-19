@@ -56,6 +56,9 @@ def get_dense_attrs(coords : torch.Tensor, feats : torch.Tensor, res : int, sdf_
     return dense_attrs.reshape(-1, F)
 
 
-def get_defomed_verts(v_pos : torch.Tensor, deform : torch.Tensor, res):
-    return v_pos / res - 0.5 + (1 - 1e-8) / (res * 2) * torch.tanh(deform)
-        
+# def get_defomed_verts(v_pos : torch.Tensor, deform : torch.Tensor, res):
+#     return v_pos / res - 0.5 + (1 - 1e-8) / (res * 2) * torch.tanh(deform)
+def get_defomed_verts(v_pos: torch.Tensor, deform: torch.Tensor, res: int):
+    base = v_pos / res - 0.5
+    offs = (1 - 1e-8) / (res * 2) * torch.tanh(deform)
+    return 2.0 * (base + offs)

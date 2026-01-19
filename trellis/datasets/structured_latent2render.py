@@ -6,7 +6,7 @@ import torch
 import utils3d.torch
 from ..modules.sparse.basic import SparseTensor
 from .components import StandardDatasetBase
-
+import glob
 
 class SLat2Render(StandardDatasetBase):
     """
@@ -121,6 +121,250 @@ class SLat2Render(StandardDatasetBase):
         
 
 class Slat2RenderGeo(SLat2Render):
+    def __init__(
+        self,
+        roots: str,
+        image_size: int,
+        latent_model: str,
+        min_aesthetic_score: float = 5.0,
+        max_num_voxels: int = 32768,
+    ):
+        super().__init__(
+            roots,
+            image_size,
+            latent_model,
+            min_aesthetic_score,
+            max_num_voxels,
+        )
+        
+    def _get_geo(self, root, instance):
+        verts, face = utils3d.io.read_ply(os.path.join(root, 'renders', instance, 'mesh.ply'))
+        mesh = {
+            "vertices" : torch.from_numpy(verts),
+            "faces" : torch.from_numpy(face),
+        }
+        return  {
+            "mesh" : mesh,
+        }
+        
+    def get_instance(self, root, instance):
+        image = self._get_image(root, instance)
+        latent = self._get_latent(root, instance)
+        geo = self._get_geo(root, instance)
+        return {
+            **image,
+            **latent,
+            **geo,
+        }
+        
+        
+
+
+class SLat2RenderPose(StandardDatasetBase):
+    """
+    Dataset for Structured Latent and rendered images.
+    
+    Args:
+        roots (str): paths to the dataset
+        image_size (int): size of the image
+        latent_model (str): latent model name
+        min_aesthetic_score (float): minimum aesthetic score
+        max_num_voxels (int): maximum number of voxels
+    """
+    def __init__(
+        self,
+        roots: str,
+        image_size: int,
+        latent_model: str,
+        min_aesthetic_score: float = 5.0,
+        max_num_voxels: int = 32768,
+    ):
+        self.image_size = image_size
+        self.latent_model = latent_model
+        self.min_aesthetic_score = min_aesthetic_score
+        self.max_num_voxels = max_num_voxels
+        self.value_range = (0, 1)
+        
+        super().__init__(roots)
+        
+    def filter_metadata(self, metadata):
+        stats = {}
+        metadata = metadata[metadata[f'latent_{self.latent_model}']]
+        stats['With latent'] = len(metadata)
+        metadata = metadata[metadata['aesthetic_score'] >= self.min_aesthetic_score]
+        stats[f'Aesthetic score >= {self.min_aesthetic_score}'] = len(metadata)
+        metadata = metadata[metadata['num_voxels'] <= self.max_num_voxels]
+        stats[f'Num voxels <= {self.max_num_voxels}'] = len(metadata)
+        return metadata, stats
+
+    def _get_image(self, root, instance):
+        with open(os.path.join(root, 'renders', instance, 'transforms.json')) as f:
+            metadata = json.load(f)
+        n_views = len(metadata['frames'])
+        view = np.random.randint(n_views)
+        metadata = metadata['frames'][view]
+        fov = metadata['camera_angle_x']
+        intrinsics = utils3d.torch.intrinsics_from_fov_xy(torch.tensor(fov), torch.tensor(fov))
+        c2w = torch.tensor(metadata['transform_matrix'])
+        c2w[:3, 1:3] *= -1
+        extrinsics = torch.inverse(c2w)
+
+        image_path = os.path.join(root, 'renders', instance, metadata['file_path'])
+        image = Image.open(image_path)
+        alpha = image.getchannel(3)
+        image = image.convert('RGB')
+        image = image.resize((self.image_size, self.image_size), Image.Resampling.LANCZOS)
+        alpha = alpha.resize((self.image_size, self.image_size), Image.Resampling.LANCZOS)
+        image = torch.tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
+        alpha = torch.tensor(np.array(alpha)).float() / 255.0
+        
+        return {
+            'image': image,
+            'alpha': alpha,
+            'extrinsics': extrinsics,
+            'intrinsics': intrinsics,
+        }
+    
+    def _list_pose_tags(self, root, instance):
+        pose_dir = os.path.join(root, "data_pose_norm", instance)
+        latent_dir = os.path.join(root, "latents_pose", self.latent_model)
+        meta_paths = sorted(glob.glob(os.path.join(pose_dir, f"{instance}_f*_meta.json")))
+        tags = [os.path.basename(p).replace("_meta.json", "") for p in meta_paths]
+        tags = [t for t in tags if os.path.exists(os.path.join(latent_dir, f"{t}.npz"))]
+        return tags
+
+
+    def _pick_pose_tag(self, tags):
+        if len(tags) == 0:
+            return None
+        # if self.pose_sampling == "first":
+        #     return tags[0]
+        return tags[np.random.randint(len(tags))]
+
+
+    def _load_pose_pack(self, root, instance, pose_tag):
+        latent_path = os.path.join(root, "latents_pose", self.latent_model, f"{pose_tag}.npz")
+        meta_path = os.path.join(root, "data_pose_norm", instance, f"{pose_tag}_meta.json")
+        pack = np.load(latent_path, allow_pickle=True)
+        meta = json.load(open(meta_path, "r"))
+
+        coords = torch.tensor(pack["coords"]).int()          # posed indices (N,3)
+        feats  = torch.tensor(pack["feats"]).float()    # (N,C)
+
+        # pose params needed for posed->world in decoder/trainer
+        pose = meta["pose"]
+        can  = meta["canonical"]
+        pose_params = {
+            "R_row": torch.tensor(pose["R_fixed"]).float(),      # (3,3)
+            "s_aug": torch.tensor(pose["s_aug"]).float(),        # ()
+            "t_aug": torch.tensor(pose["t_aug"]).float(),        # (3,)
+            "c0":    torch.tensor(pose["c0"]).float(),           # (3,)
+            "s_norm": torch.tensor(can["s_norm"]).float(),       # ()
+            "c_norm": torch.tensor(can["c_norm"]).float(),       # (3,)
+            "origin": torch.tensor(meta['grid']["origin"]).float(),       # (3,)
+            "voxel_size": torch.tensor(meta['grid']["voxel_size"]).float(), # ()
+        }
+        return coords, feats, pose_params
+    
+    def _dbg_shape(self, x, name, meta_path, pose_tag):
+        if not torch.is_tensor(x):
+            print(f"[POSE SHAPE] {name} is not tensor?? type={type(x)} file={meta_path} tag={pose_tag}")
+            return
+        # print(f"[POSE SHAPE] {name}: shape={tuple(x.shape)} ndim={x.ndim} file={meta_path} tag={pose_tag}")
+
+    def _validate_pose_params(self, pose_params, meta_path, pose_tag):
+        for k in ["R_row","t_aug","c0","c_norm"]:
+            self._dbg_shape(pose_params[k], k, meta_path, pose_tag)
+
+        # Hard asserts (fail fast, so you find the first bad file)
+        assert pose_params["R_row"].shape == (3,3), f"bad R_row {pose_params['R_row'].shape} in {meta_path}"
+        for k in ["t_aug","c0","c_norm"]:
+            assert pose_params[k].numel() == 3, f"bad {k} numel={pose_params[k].numel()} shape={pose_params[k].shape} in {meta_path}"
+
+
+    def _get_latent(self, root, instance):
+        tags = self._list_pose_tags(root, instance)
+        pose_tag = self._pick_pose_tag(tags)
+        if pose_tag is None:
+            print(root, instance)
+            print('ERRORRRRR: no pose tag found!')
+            exit(1)
+        else:
+            coords, feats, pose_params = self._load_pose_pack(root, instance, pose_tag)
+            self._validate_pose_params(pose_params, tags, pose_tag)
+
+        out = {"coords": coords, "feats": feats}
+        if pose_params is not None:
+            out["pose_params"] = pose_params  # dict of tensors
+        else:
+            out["pose_params"] = None
+        
+        return out
+    
+    @torch.no_grad()
+    def visualize_sample(self, sample: dict):
+        return sample['image']
+
+    @staticmethod
+    def collate_fn(batch):
+        pack = {}
+        coords = []
+        for i, b in enumerate(batch):
+            coords.append(torch.cat([torch.full((b['coords'].shape[0], 1), i, dtype=torch.int32), b['coords']], dim=-1))
+        coords = torch.cat(coords)
+        feats = torch.cat([b['feats'] for b in batch])
+        pack['latents'] = SparseTensor(
+            coords=coords,
+            feats=feats,
+        )
+        pack['image'] = torch.stack([b['image'] for b in batch])
+        pack['alpha'] = torch.stack([b['alpha'] for b in batch])
+        pack['extrinsics'] = torch.stack([b['extrinsics'] for b in batch])
+        pack['intrinsics'] = torch.stack([b['intrinsics'] for b in batch])
+        pack['mesh'] = [b['mesh'] for b in batch]
+        
+        posed_mask = torch.tensor([b["pose_params"] is not None for b in batch], dtype=torch.bool)
+        pack["posed_mask"] = posed_mask
+
+        def stack_param(name, default):
+            vals = []
+            for b in batch:
+                if b["pose_params"] is None:
+                    vals.append(default.clone())
+                else:
+                    vals.append(b["pose_params"][name])
+            return torch.stack(vals, dim=0)
+
+        # defaults = identity transform for vanilla samples
+        I3 = torch.eye(3)
+        z3 = torch.zeros(3)
+        one = torch.tensor(1.0)
+        origin_default = torch.tensor([-1.0, -1.0, -1.0])
+        voxel_default  = torch.tensor(2.0 / 64)   # careful: collate_fn is static; pass resolution in or store it
+
+        pack["R_row"]  = stack_param("R_row", I3)     # (B,3,3)
+        pack["s_aug"]  = stack_param("s_aug", one)    # (B,)
+        pack["t_aug"]  = stack_param("t_aug", z3)     # (B,3)
+        pack["c0"]     = stack_param("c0",  z3)       # (B,3)
+        pack["s_norm"] = stack_param("s_norm", one)   # (B,)
+        pack["c_norm"] = stack_param("c_norm", z3)    # (B,3)
+        pack['origin'] = stack_param("origin", origin_default)    # alias for convenience
+        pack['voxel_size'] = stack_param("voxel_size", voxel_default)  # alias for convenience
+        
+        
+
+        return pack
+
+    def get_instance(self, root, instance):
+        image = self._get_image(root, instance)
+        latent = self._get_latent(root, instance)
+        return {
+            **image,
+            **latent,
+        }
+        
+
+class Slat2RenderGeoPose(SLat2RenderPose):
     def __init__(
         self,
         roots: str,
