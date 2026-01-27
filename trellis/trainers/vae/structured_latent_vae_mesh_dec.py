@@ -5,6 +5,8 @@ from torch.utils.data import DataLoader
 import numpy as np
 from easydict import EasyDict as edict
 import utils3d.torch
+import trimesh
+import os
 
 from ..basic import BasicTrainer
 from ...representations import MeshExtractResult
@@ -1295,6 +1297,60 @@ class SLatVaeMeshDecoderTrainerPose(BasicTrainer):
 
         return terms, {}
 
+
+    def _attrs_to_rgb_uint8(self, attrs: np.ndarray) -> np.ndarray:
+        """
+        attrs: (V,C) float. We use attrs[:, :3] as RGB.
+        Handles RGB in [0,1] or [-1,1]. Returns (V,4) uint8 (RGBA).
+        """
+        if attrs is None or attrs.size == 0:
+            return None
+        if attrs.ndim != 2 or attrs.shape[1] < 3:
+            return None
+
+        rgb = attrs[:, :3].astype(np.float32)
+
+        # Heuristic: if looks like [-1,1], map to [0,1]
+        if rgb.min() < -0.05 or rgb.max() > 1.05:
+            # assume [-1,1] (or wider) -> map and clamp
+            rgb = (rgb + 1.0) * 0.5
+
+        rgb = np.clip(rgb, 0.0, 1.0)
+        rgb8 = (rgb * 255.0 + 0.5).astype(np.uint8)
+
+        # add opaque alpha for PLY viewers that like RGBA
+        a = np.full((rgb8.shape[0], 1), 255, dtype=np.uint8)
+        return np.concatenate([rgb8, a], axis=1)
+
+    def save_mesh_extract_result_ply(self, rep, out_path: str, save_colors: bool = True) -> bool:
+        """
+        rep: MeshExtractResult (or anything with .vertices, .faces, .vertex_attrs, .success)
+        Writes a PLY in rep's coordinate frame.
+        """
+        if rep is None or (hasattr(rep, "success") and not rep.success):
+            return False
+
+        v = rep.vertices.detach().float().cpu().numpy()
+        f = rep.faces.detach().long().cpu().numpy()
+
+        # basic sanity
+        if v.shape[0] == 0 or f.shape[0] == 0:
+            return False
+        if not np.isfinite(v).all():
+            return False
+
+        m = trimesh.Trimesh(vertices=v, faces=f, process=False)
+
+        if save_colors and getattr(rep, "vertex_attrs", None) is not None:
+            attrs = rep.vertex_attrs.detach().float().cpu().numpy()
+            rgba = self._attrs_to_rgb_uint8(attrs)
+            if rgba is not None and rgba.shape[0] == v.shape[0]:
+                m.visual.vertex_colors = rgba  # (V,4) uint8 works well for PLY
+
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        m.export(out_path)  # filetype inferred from suffix
+        return True
+    
     @torch.no_grad()
     def run_snapshot(
         self,
@@ -1432,7 +1488,26 @@ class SLatVaeMeshDecoderTrainerPose(BasicTrainer):
             c_norm=pose_args["c_norm"],
             posed_mask=pose_args.get("posed_mask", None),
         )
+        os.makedirs(os.path.join(self.output_dir, f"snap_meshes{self.step}"), exist_ok=True)
+        out_dir = os.path.join(self.output_dir, f"snap_meshes{self.step}")  # pick your folder
+        for i, rep in enumerate(reps_world):
+            self.save_mesh_extract_result_ply(
+                rep,
+                os.path.join(out_dir, f"pred_{i:03d}.ply"),
+                save_colors=True
+            )
 
+        # (optional) also save GT meshes for comparison
+        for i, mgt in enumerate(gt_meshes):
+            gt_rep = MeshExtractResult(
+                vertices=mgt["vertices"].to(self.device),
+                faces=mgt["faces"].to(self.device),
+            )
+            self.save_mesh_extract_result_ply(
+                gt_rep,
+                os.path.join(out_dir, f"gt_{i:03d}.ply"),
+                save_colors=False
+            )
         # -------------------------
         # render single view (GT cameras, WORLD frame)
         # -------------------------
