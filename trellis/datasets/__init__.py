@@ -20,8 +20,10 @@ __attributes = {
     'ImageConditionedSparseStructureLatentSDFConditioned': 'sparse_structure_latent',
 
     'SLat': 'structured_latent',
+    'SLatVisMixin': 'structured_latent',
     'TextConditionedSLat': 'structured_latent',
     'ImageConditionedSLat': 'structured_latent',
+    'ImageConditionedSLatPose': 'structured_latent',
 
     'TestDatasetConditioned': 'test_dataset',
 }
@@ -70,6 +72,8 @@ if __name__ == '__main__':
 
     from .structured_latent import (
         SLat,
+        SlatPose,
         TextConditionedSLat,
         ImageConditionedSLat,
+        ImageConditionedSLatPose,
     )
