@@ -393,27 +393,113 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
             raise ValueError(f"Unknown t_schedule: {self.t_schedule['name']}")
         return t
 
+    # def training_losses(
+    #         self,
+    #         x_0: torch.Tensor,
+    #         x0_hand: torch.Tensor,
+    #         cond=None,
+    #         mask_hand=None,
+    #         mask_obj=None,
+    #         cond_mask=None,
+    #         touch=None,
+    #         **kwargs
+    #     ) -> Tuple[Dict, Dict]:
+
+    #     noise = torch.randn_like(x_0)
+    #     t = self.sample_t(x_0.shape[0]).to(x_0.device).float()
+    #     x_t = self.diffuse(x_0, t, noise=noise)
+
+    #     # Get (possibly CFG-dropped) conditions
+    #     cond_dict = self.get_cond(cond, mask_hand, mask_obj, cond_mask, x0_hand, touch, **kwargs)
+
+    #     # Pass the whole dict to the denoget_condiser (as you already do)
+    #     pred = self.training_models['denoiser'](x_t, t * 1000, cond_dict, **kwargs)
+
+    #     assert pred.shape == noise.shape == x_0.shape
+    #     target = self.get_v(x_0, noise, t)
+
+    #     terms = edict()
+    #     mse_loss_term = F.mse_loss(pred, target)
+    #     terms["mse"] = mse_loss_term
+    #     terms["loss"] = mse_loss_term
+
+    #     if self.use_encoding_hand:
+    #         x0_pred = (1 - self.sigma_min) * noise - pred
+    #         sdf_obj  = self.ss_dec(x0_pred)              # [B, 1, 64, 64, 64]
+    #         with torch.no_grad():
+    #             # Add non-interpenetration
+    #             sdf_hand = self.ss_dec(x0_hand)          # [B, 1, 64, 64, 64]
+    #         max_pen = 0.1  # clamp SDF to avoid very deep, noisy gradients
+    #         obj_inside  = max_pen * torch.tanh(torch.nn.relu(-sdf_obj)/max_pen)
+    #         hand_inside = max_pen * torch.tanh(torch.nn.relu(-sdf_hand)/max_pen)
+
+    #         interpenetration = obj_inside * hand_inside  # [B, 1, D, H, W]
+
+    #         # mask of voxels that actually penetrate
+    #         pen_mask = (obj_inside > 0) & (hand_inside > 0)  # same shape
+
+    #         B = interpenetration.shape[0]
+    #         # sum over 3D dims
+    #         num  = (interpenetration * pen_mask).view(B, -1).sum(dim=1)      # [B]
+    #         den  = pen_mask.view(B, -1).sum(dim=1).clamp_min(1)             # [B], #penetrating voxels
+    #         ni_per_sample = num / den                                       # [B]
+    #         ni_loss = ni_per_sample.mean()
+
+    #         lambda_ni = self.get_lambda_ni()          # scalar (float or 0-d tensor)
+    #         terms["ni_loss_raw"] = ni_loss
+    #         terms["ni_loss"] = lambda_ni * ni_loss           # unweighted
+
+    #         terms["loss"] = terms["loss"] + lambda_ni * ni_loss
+
+
+    #         if self.use_touch:
+    #             contact_mask = touch[:, 0]                     # [B, 64, 64, 64], 0/1
+    #             contact_sdf  = contact_mask * sdf_obj.abs()    # [B, 64, 64, 64]
+
+    #             B = contact_sdf.shape[0]
+    #             num   = contact_sdf.view(B, -1).sum(dim=1)     # [B]
+    #             denom = contact_mask.view(B, -1).sum(dim=1)    # [B]
+    #             denom = denom.clamp_min(1)                     # avoid divide-by-zero
+
+    #             per_sample_loss = num / denom                  # [B]
+    #             contact_loss = per_sample_loss.mean()          # scalar
+    #             terms["contact_raw"] = contact_loss
+    #             terms["contact_loss"] = contact_loss * self.lambda_contact # weight for contact loss
+
+    #             terms["loss"] += contact_loss * self.lambda_contact
+
+    #     # time-bin logging unchanged
+    #     mse_per_instance = np.array([
+    #         F.mse_loss(pred[i], target[i]).item()
+    #         for i in range(x_0.shape[0])
+    #     ])
+    #     time_bin = np.digitize(t.cpu().numpy(), np.linspace(0, 1, 11)) - 1
+    #     for i in range(10):
+    #         if (time_bin == i).sum() != 0:
+    #             terms[f"bin_{i}"] = {"mse": mse_per_instance[time_bin == i].mean()}
+
+    #     return terms, {}
     def training_losses(
-            self,
-            x_0: torch.Tensor,
-            x0_hand: torch.Tensor,
-            cond=None,
-            mask_hand=None,
-            mask_obj=None,
-            cond_mask=None,
-            touch=None,
-            **kwargs
-        ) -> Tuple[Dict, Dict]:
+        self,
+        x_0: torch.Tensor,
+        x0_hand: torch.Tensor,
+        cond=None,
+        mask_hand=None,
+        mask_obj=None,
+        cond_mask=None,
+        touch=None,
+        **kwargs
+    ) -> Tuple[Dict, Dict]:
 
         noise = torch.randn_like(x_0)
-        t = self.sample_t(x_0.shape[0]).to(x_0.device).float()
+        t = self.sample_t(x_0.shape[0]).to(x_0.device).float()          # [B]
         x_t = self.diffuse(x_0, t, noise=noise)
 
         # Get (possibly CFG-dropped) conditions
         cond_dict = self.get_cond(cond, mask_hand, mask_obj, cond_mask, x0_hand, touch, **kwargs)
 
-        # Pass the whole dict to the denoget_condiser (as you already do)
-        pred = self.training_models['denoiser'](x_t, t * 1000, cond_dict, **kwargs)
+        # Denoiser forward
+        pred = self.training_models["denoiser"](x_t, t * 1000, cond_dict, **kwargs)
 
         assert pred.shape == noise.shape == x_0.shape
         target = self.get_v(x_0, noise, t)
@@ -423,57 +509,74 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         terms["mse"] = mse_loss_term
         terms["loss"] = mse_loss_term
 
+        # ---------- Physics weighting by time ----------
+        # Smoothly downweight physics at high t (noisy)
+        # p=2 is a solid default; increase to focus even more on small t.
+        p = getattr(self, "physics_time_power", 2.0)
+        w = (1.0 - t).clamp(0.0, 1.0).pow(p)                            # [B]
+        w_sum = w.sum().clamp_min(1e-8)
+
         if self.use_encoding_hand:
-            x0_pred = (1 - self.sigma_min) * noise - pred
-            sdf_obj  = self.ss_dec(x0_pred)              # [B, 1, 64, 64, 64]
+            # x0 prediction from v-pred
+            x0_pred = (1.0 - self.sigma_min) * noise - pred
+
+            # Decode to SDF (do physics in fp32 for stability)
+            sdf_obj = self.ss_dec(x0_pred).float()                       # [B, 1, 64, 64, 64]
             with torch.no_grad():
-                # Add non-interpenetration
-                sdf_hand = self.ss_dec(x0_hand)          # [B, 1, 64, 64, 64]
-            max_pen = 0.1  # clamp SDF to avoid very deep, noisy gradients
-            obj_inside  = torch.clamp(-sdf_obj, 0.0, max_pen)
-            hand_inside = torch.clamp(-sdf_hand, 0.0, max_pen)
+                sdf_hand = self.ss_dec(x0_hand).float()                  # [B, 1, 64, 64, 64]
 
-            interpenetration = obj_inside * hand_inside  # [B, 1, D, H, W]
+            # Smooth saturation (keeps gradients for deep penetration)
+            max_pen = 0.1
+            obj_inside  = max_pen * torch.tanh(F.relu(-sdf_obj) / max_pen)
+            hand_inside = max_pen * torch.tanh(F.relu(-sdf_hand) / max_pen)
 
-            # mask of voxels that actually penetrate
-            pen_mask = (obj_inside > 0) & (hand_inside > 0)  # same shape
+            # Hand region mask (fixed / no-grad)
+            # You can swap this for a surface band if you prefer:
+            # band = (sdf_hand.abs() < eps).float()
+            hand_mask = (hand_inside > 0).float()                        # [B,1,D,H,W]
 
-            B = interpenetration.shape[0]
-            # sum over 3D dims
-            num  = (interpenetration * pen_mask).view(B, -1).sum(dim=1)      # [B]
-            den  = pen_mask.view(B, -1).sum(dim=1).clamp_min(1)             # [B], #penetrating voxels
-            ni_per_sample = num / den                                       # [B]
-            ni_loss = ni_per_sample.mean()
+            B = sdf_obj.shape[0]
 
-            lambda_ni = self.get_lambda_ni()          # scalar (float or 0-d tensor)
+            # Interpenetration: object inside where hand exists
+            # (no discontinuous pen_mask; this is smoother)
+            num = (obj_inside * hand_mask).view(B, -1).sum(dim=1)        # [B]
+            den = hand_mask.view(B, -1).sum(dim=1).clamp_min(1.0)        # [B]
+            ni_per_sample = num / den                                    # [B]
 
-            terms["ni_loss"] = lambda_ni * ni_loss           # unweighted
+            # Time-weighted batch mean
+            ni_loss_raw = (w * ni_per_sample).sum() / w_sum
 
-            terms["loss"] = terms["loss"] + lambda_ni * ni_loss
+            lambda_ni = self.get_lambda_ni()
+            terms["ni_loss_raw"] = ni_loss_raw
+            terms["ni_loss"] = lambda_ni * ni_loss_raw
+            terms["loss"] = terms["loss"] + lambda_ni * ni_loss_raw
 
+            if self.use_touch and (touch is not None):
+                # touch: [B, 2, 64, 64, 64]
+                contact_mask = touch[:, 0].float()                       # [B, 64, 64, 64]
 
-            if self.use_touch:
-                contact_mask = touch[:, 0]                     # [B, 64, 64, 64], 0/1
-                contact_sdf  = contact_mask * sdf_obj.abs()    # [B, 64, 64, 64]
+                # sdf_obj: [B,1,64,64,64] -> [B,64,64,64]
+                sdf_abs = sdf_obj.abs().squeeze(1)
 
-                B = contact_sdf.shape[0]
-                num   = contact_sdf.view(B, -1).sum(dim=1)     # [B]
-                denom = contact_mask.view(B, -1).sum(dim=1)    # [B]
-                denom = denom.clamp_min(1)                     # avoid divide-by-zero
+                contact_sdf = contact_mask * sdf_abs                      # [B, 64, 64, 64]
 
-                per_sample_loss = num / denom                  # [B]
-                contact_loss = per_sample_loss.mean()          # scalar
+                num = contact_sdf.view(B, -1).sum(dim=1)                  # [B]
+                den = contact_mask.view(B, -1).sum(dim=1).clamp_min(1.0)  # [B]
+                contact_per_sample = num / den                            # [B]
 
-                terms["contact_loss"] = contact_loss * self.lambda_contact # weight for contact loss
+                # Time-weighted batch mean
+                contact_raw = (w * contact_per_sample).sum() / w_sum
 
-                terms["loss"] += contact_loss * self.lambda_contact
+                terms["contact_raw"] = contact_raw
+                terms["contact_loss"] = contact_raw * self.lambda_contact
+                terms["loss"] = terms["loss"] + contact_raw * self.lambda_contact
 
-        # time-bin logging unchanged
+        # time-bin logging (unchanged)
         mse_per_instance = np.array([
             F.mse_loss(pred[i], target[i]).item()
             for i in range(x_0.shape[0])
         ])
-        time_bin = np.digitize(t.cpu().numpy(), np.linspace(0, 1, 11)) - 1
+        time_bin = np.digitize(t.detach().cpu().numpy(), np.linspace(0, 1, 11)) - 1
         for i in range(10):
             if (time_bin == i).sum() != 0:
                 terms[f"bin_{i}"] = {"mse": mse_per_instance[time_bin == i].mean()}
@@ -488,7 +591,7 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         batch_size: int,
         verbose: bool = False,
     ) -> Dict:
-        
+        num_samples = 8
         if self.snapshot_indices is None:
             g = torch.Generator().manual_seed(1234)  # or choose your favourite seed
             self.snapshot_indices = torch.randperm(len(self.dataset), generator=g)[:num_samples]
