@@ -370,6 +370,51 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
             ret[k] = torch.stack(v, dim=0)
         return ret
 
+    @torch.no_grad()
+    def _pose_to_canonical_u2_params(self, R_row, s_aug, t_aug, c0, eps=1e-12):
+        """
+        Map x_pose_u2 -> x_canon_u2
+        
+        Forward you used when generating posed grids:
+        x_pose = ((x_canon - c0) @ R) * s_aug + t_aug
+        
+        Inverse:
+        x_canon = ((x_pose - t_aug)/s_aug) @ R^T + c0
+             = (x_pose @ R^T) * (1/s_aug) + (c0 - (t_aug @ R^T)*(1/s_aug))
+        """
+        B = R_row.shape[0]
+        s_aug = s_aug.view(B, 1).clamp_min(eps)   # (B,1)
+        k = 1.0 / s_aug                           # (B,1)
+        
+        tR = torch.einsum("bi,bij->bj", t_aug, R_row.transpose(1, 2))  # t @ R^T  -> (B,3)
+        b = c0 - tR * k                                                 # (B,3)
+        return R_row, k, b
+
+    @torch.no_grad()
+    def _pose_to_render_params(self, R_row, s_aug, t_aug, c0, *, target="unit2", eps=1e-12):
+        """
+        Maps pose-space coords back to the *render* canonical space.
+        
+        Pose generation was:
+        x_pose = ((x_can - c0) @ R) * s + t     (row-vector convention)
+        
+        Inverse (back to canonical render space):
+        x_can = (x_pose @ R^T) * (1/s) + (c0 - (t @ R^T)/s)
+        
+        If your render space is unitcube [-0.5,0.5]^3, additionally do x_uc = 0.5 * x_can.
+        """
+        B = R_row.shape[0]
+        s_aug = s_aug.view(B, 1).clamp_min(eps)
+        
+        k = 1.0 / s_aug                                   # (B,1)
+        tR = torch.einsum("bi,bij->bj", t_aug, R_row.transpose(1, 2))  # t @ R^T, (B,3)
+        b = c0 - tR * k                                    # (B,3)
+    
+        if target == "unitcube":
+            k = 0.5 * k
+            b = 0.5 * b
+            
+        return R_row, k, b
 
 
     def xyz_stats(self,xyz01: torch.Tensor, name="xyz01"):
@@ -423,6 +468,7 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
         R_row, s_aug, t_aug, c0,
         s_norm, c_norm,
         origin=None, voxel_size=None,
+            blender_scale=None, blender_offset=None,
         intrinsics=None, extrinsics=None,
         posed_mask=None,                    # [B] bool or None
         force_unit2_aabb: bool = True,
@@ -453,7 +499,10 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
 
         # This must be the *correct* one you validated with the cost-matrix diag:
         # xyz_world = (xyz_pose @ R^T) * k + b
-        R, k, b = self._pose_to_world_params(R_row, s_aug, t_aug, c0, s_norm, c_norm)
+        R, k, b = self._pose_to_world_params(R_row, s_aug, t_aug, c0, s_norm, c_norm, blender_scale, blender_offset)
+        #R, k, b = self._pose_to_render_params(R_row, s_aug, t_aug, c0, target="unit2")  # or "unitcube"
+        #R, k, b = self._pose_to_canonical_u2_params(R_row, s_aug, t_aug, c0)
+
         # R: [B,3,3], k: [B] or [B,1], b: [B,3]
 
         reps_world = []
@@ -485,7 +534,7 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
                 rep_w.aabb = aabb_u2
 
                 # world [-1,1] -> internal [0,1]
-                xyz01 = (xyz_world + 1.0) * 0.5
+                xyz01 = (xyz_world + 1) *0.5
             else:
                 # map into existing aabb
                 aabb = rep_w.aabb.to(device=xyz_world.device, dtype=xyz_world.dtype)
@@ -587,7 +636,7 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
 
 
     @torch.no_grad()
-    def _pose_to_world_params(self, R_row, s_aug, t_aug, c0, s_norm, c_norm, eps=1e-12):
+    def _pose_to_world_params(self, R_row, s_aug, t_aug, c0, s_norm, c_norm, blender_scale=None, blender_offset=None, eps=1e-12):
         """
         Inputs:
         R_row : (B,3,3)
@@ -619,8 +668,17 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
 
         b = c_norm + (c0 / s_norm.clamp_min(eps)) - (tR * k)         # (B,3)
 
-        R = R_row
-        return R, k, b
+        if blender_scale is not None:
+            sb = blender_scale.view(B, 1).to(k.device)
+            k = k * sb
+            
+            b = b * sb
+        
+        if blender_offset is not None:
+            ob = blender_offset.view(B, 3).to(b.device)
+            b = b + ob
+            R = R_row
+        return R_row, k, b
 
 
     @torch.no_grad()
@@ -774,6 +832,8 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
         c_norm: torch.Tensor,         # [B,3]
         origin: torch.Tensor = None,
         voxel_size: torch.Tensor = None,
+        blender_scale: torch.Tensor = None,
+        blender_offset: torch.Tensor = None,
         posed_mask: torch.Tensor = None,  # [B] bool
         return_aux: bool = False,
         **kwargs
@@ -794,6 +854,7 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
             R_row=R_row, s_aug=s_aug, t_aug=t_aug, c0=c0,
             s_norm=s_norm, c_norm=c_norm,
             origin=origin, voxel_size=voxel_size,
+            blender_scale=blender_scale, blender_offset=blender_offset,
             posed_mask=posed_mask,
             # keep debug False in training
             debug=False,
@@ -901,7 +962,7 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
         # pose metadata (needed to map POSE->WORLD)
         pose_pack = {
             "R_row": [], "s_aug": [], "t_aug": [], "c0": [], "s_norm": [], "c_norm": [],
-            "origin": [], "voxel_size": []
+            "origin": [], "voxel_size": [], "blender_scale": [], "blender_offset":[],
         }
 
         reps_pose = []
@@ -910,6 +971,7 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
         for i in range(0, num_samples, batch_size):
             batch = min(batch_size, num_samples - i)
             data = next(it)
+            
             args = {k: v[:batch].cuda() for k, v in data.items()}
 
             # GT for visualization
@@ -918,7 +980,7 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
             # Cameras are WORLD cameras
             exts.append(args["extrinsics"])
             ints.append(args["intrinsics"])
-
+            
             # Pose params (must match the samples in this batch)
             for k in pose_pack:
                 if k in args:
@@ -960,6 +1022,8 @@ class SLatVaeGaussianTrainerPose(BasicTrainer):
             c_norm=pose_args["c_norm"],
             origin=pose_args.get("origin", None),
             voxel_size=pose_args.get("voxel_size", None),
+            blender_scale=pose_args.get("blender_scale", None),
+            blender_offset=pose_args.get("blender_offset", None),
             intrinsics=ints,
             extrinsics=exts,
             debug=False,

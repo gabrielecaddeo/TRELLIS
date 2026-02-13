@@ -7,7 +7,7 @@ import torch
 import utils3d.torch
 from ..modules.sparse.basic import SparseTensor
 from .components import StandardDatasetBase
-
+import trimesh
 
 class SparseFeat2Render(StandardDatasetBase):
     """
@@ -45,8 +45,8 @@ class SparseFeat2Render(StandardDatasetBase):
         stats['With features'] = len(metadata)
         metadata = metadata[metadata['aesthetic_score'] >= self.min_aesthetic_score]
         stats[f'Aesthetic score >= {self.min_aesthetic_score}'] = len(metadata)
-        metadata = metadata[metadata['num_voxels'] <= self.max_num_voxels]
-        stats[f'Num voxels <= {self.max_num_voxels}'] = len(metadata)
+        #metadata = metadata[metadata['num_voxels'] <= self.max_num_voxels]
+        #stats[f'Num voxels <= {self.max_num_voxels}'] = len(metadata)
         return metadata, stats
 
     def _get_image(self, root, instance):
@@ -130,6 +130,8 @@ class SparseFeat2Render(StandardDatasetBase):
     def get_instance(self, root, instance):
         image = self._get_image(root, instance)
         feat = self._get_feat(root, instance)
+        
+
         return {
             **image,
             **feat,
@@ -190,6 +192,7 @@ class SparseFeat2RenderPose(StandardDatasetBase):
     def _load_pose_pack(self, root, instance, pose_tag):
         feat_path = os.path.join(root, "features", self.model, f"{pose_tag}.npz")
         meta_path = os.path.join(root, "data_pose_norm", instance, f"{pose_tag}_meta.json")
+        
         pack = np.load(feat_path, allow_pickle=True)
         meta = json.load(open(meta_path, "r"))
 
@@ -226,8 +229,8 @@ class SparseFeat2RenderPose(StandardDatasetBase):
         stats['With features'] = len(metadata)
         metadata = metadata[metadata['aesthetic_score'] >= self.min_aesthetic_score]
         stats[f'Aesthetic score >= {self.min_aesthetic_score}'] = len(metadata)
-        metadata = metadata[metadata['num_voxels'] <= self.max_num_voxels]
-        stats[f'Num voxels <= {self.max_num_voxels}'] = len(metadata)
+        #metadata = metadata[metadata['num_voxels'] <= self.max_num_voxels]
+        #stats[f'Num voxels <= {self.max_num_voxels}'] = len(metadata)
         return metadata, stats
     
     @torch.no_grad()
@@ -316,9 +319,11 @@ class SparseFeat2RenderPose(StandardDatasetBase):
         # sparse feats
         coords = []
         feats = []
+
         for i, b in enumerate(batch):
             coords.append(torch.cat([torch.full((b['coords'].shape[0], 1), i, dtype=torch.int32), b['coords']], dim=-1))
             feats.append(b['feats'])
+            
         pack['feats'] = SparseTensor(coords=torch.cat(coords, dim=0), feats=torch.cat(feats, dim=0))
 
         # images/cams
@@ -326,6 +331,24 @@ class SparseFeat2RenderPose(StandardDatasetBase):
         pack['alpha'] = torch.stack([b['alpha'] for b in batch])
         pack['extrinsics'] = torch.stack([b['extrinsics'] for b in batch])
         pack['intrinsics'] = torch.stack([b['intrinsics'] for b in batch])
+        # if 'blender_scale' in b.keys():
+        #     pack['blender_scale']= torch.stack([b['blender_scale'] for b in batch])
+        #     pack['blender_offset']= torch.stack([b['blender_offset'] for b in batch])
+        # blender scale/offset: always produce tensors; fill missing with no-op defaults
+        ref = batch[0]["image"]
+        device = ref.device
+        dtype  = ref.dtype
+
+        scale_default  = torch.tensor(1.0, device=device, dtype=dtype)          # ()
+        offset_default = torch.zeros(3, device=device, dtype=dtype)             # (3,)
+
+        pack["blender_scale"] = torch.stack(
+            [b.get("blender_scale", scale_default) for b in batch], dim=0
+        )  # (B,)
+
+        pack["blender_offset"] = torch.stack(
+            [b.get("blender_offset", offset_default) for b in batch], dim=0
+        )  # (B, 3)
 
         # pose params: stack per-sample (and mark which samples are posed)
         posed_mask = torch.tensor([b["pose_params"] is not None for b in batch], dtype=torch.bool)
@@ -355,12 +378,38 @@ class SparseFeat2RenderPose(StandardDatasetBase):
         pack["c_norm"] = stack_param("c_norm", z3)    # (B,3)
         pack['origin'] = stack_param("origin", origin_default)    # alias for convenience
         pack['voxel_size'] = stack_param("voxel_size", voxel_default)  # alias for convenience
-        
-
-
+    
+        #pack['mesh'] = [b['mesh'] for b in batch]
         return pack
 
+    def _get_geo(self, root, instance):
+        trim = trimesh.load_mesh(os.path.join(root, 'renders', instance, 'model.obj'))
+        mesh = {
+            "vertices" : torch.from_numpy(trim.vertices),
+            "faces" : torch.from_numpy(trim.vertices),
+        }
+
+        return  {
+            "mesh" : mesh,
+        }
+
+    def _get_blender(self, root, instance):
+        
+        blender_path = os.path.join(root, "renders_cond", instance, "transforms.json")
+        meta = json.load(open(blender_path, "r"))
+        
+        pose_params = {
+            "blender_scale": torch.tensor(meta["scale"]).float(),      # (3,3)                                                                                                                                                                                                                  
+            "blender_offset": torch.tensor(meta["offset"]).float(),        # ()                                                                                                                                                                                                                     
+             }
+        return pose_params
+        
     def get_instance(self, root, instance):
         image = self._get_image(root, instance)
         feat = self._get_feat(root, instance)
-        return {**image, **feat}
+        #mesh = self._get_geo(root, instance)
+        if 'YCB' in root or 'Google' in root:
+            blender = self._get_blender(root, instance)
+            return {**image, **feat, **blender}
+        else:
+            return {**image, **feat}
