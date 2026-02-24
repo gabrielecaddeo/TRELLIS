@@ -116,8 +116,8 @@ if __name__ == '__main__':
                         help='Number of views to render')
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world_size', type=int, default=1)
-    parser.add_argument('--max_workers', type=int, default=24)
-    parser.add_argument('--output_dir', type=str, default='/home/user/merged_google_fixed')
+    parser.add_argument('--max_workers', type=int, default=2)
+    parser.add_argument('--output_dir', type=str, default='/home/user/ycb_rerender_sam')
     parser.add_argument('--reuse_transforms_root', type=str, required=True,
                     help='Root that contains <instance>/transforms.json OR renders_cond/<instance>/transforms.json')
 
@@ -127,7 +127,7 @@ if __name__ == '__main__':
     _install_blender()
 
     
-    directories = glob.glob('/home/user/TRELLIS/datasets/Hands_Google/renders/*')
+    directories = glob.glob('/home/user/TRELLIS/datasets/Hands/renders/*')
 
     print(f'Found {len(directories)} directories')
 

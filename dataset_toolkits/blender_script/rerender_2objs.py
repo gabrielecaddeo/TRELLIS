@@ -5,7 +5,12 @@ from mathutils import Vector, Matrix
 import numpy as np
 import json
 import glob
-
+F_blcam_to_p3d = Matrix((
+    (1, 0, 0, 0),
+    (0, 1, 0, 0),
+    (0, 0,-1, 0),
+    (0, 0, 0, 1),
+))
 
 """=============== BLENDER ==============="""
 
@@ -32,6 +37,15 @@ EXT = {
     'HDR': 'hdr',
     'TARGA': 'tga'
 }
+
+
+def sim3_from_matrix(T: Matrix):
+    A = T.to_3x3()
+    s = (A.col[0].length + A.col[1].length + A.col[2].length) / 3.0
+    R = A * (1.0 / s) if s != 0 else A
+    q = R.to_quaternion()  # Blender order: (w,x,y,z)
+    t = T.to_translation()
+    return float(s), [float(q.w), float(q.x), float(q.y), float(q.z)], [float(t.x), float(t.y), float(t.z)]
 
 def init_render(engine='CYCLES', resolution=512, geo_mode=False):
     bpy.context.scene.render.engine = engine
@@ -495,6 +509,24 @@ def normalize_scene() -> Tuple[float, Vector]:
     
     return scale, offset
 
+def set_output_prefix(outputs: dict, output_folder: str, frame_idx: int, prefix: str):
+    """
+    prefix examples:
+      ""            -> 000_mask_1
+      "objonly_"    -> 000_objonly_mask_1
+    """
+    for name, out in outputs.items():
+        out.file_slots[0].path = os.path.join(output_folder, f"{frame_idx:03d}_{prefix}{name}")
+
+
+def finalize_output_files(outputs: dict):
+    for name, out in outputs.items():
+        ext = EXT[out.format.file_format]
+        pattern = f"{out.file_slots[0].path}*.{ext}"
+        matches = glob.glob(pattern)
+        if matches:
+            os.rename(matches[0], f"{out.file_slots[0].path}.{ext}")
+
 
 def get_transform_matrix(obj: bpy.types.Object) -> list:
     pos, rt, _ = obj.matrix_world.decompose()
@@ -509,6 +541,20 @@ def get_transform_matrix(obj: bpy.types.Object) -> list:
     matrix.append([0, 0, 0, 1])
     return matrix
 
+def mat4_to_list(M: Matrix) -> list:
+    return [[float(M[i][j]) for j in range(4)] for i in range(4)]
+
+def make_root(name: str, objs: List[bpy.types.Object]) -> bpy.types.Object:
+    """Return a single transform for a group of meshes."""
+    if len(objs) == 1:
+        return objs[0]
+    root = bpy.data.objects.new(name, None)  # Empty
+    bpy.context.scene.collection.objects.link(root)
+    for o in objs:
+        o.parent = root
+        o.matrix_parent_inverse = root.matrix_world.inverted()
+    bpy.context.view_layer.update()
+    return root
 
 def main(arg):
     os.makedirs(arg.output_folder, exist_ok=True)
@@ -538,6 +584,8 @@ def main(arg):
         hand_objs = load_object(arg.object_hand)
         print("Loading grasped object:", arg.object_obj)
         obj_objs = load_object(arg.object_obj)
+        hand_root = make_root("HAND_ROOT", hand_objs)
+        obj_root  = make_root("OBJ_ROOT",  obj_objs)
 
         # Assign object indices for masks
         for o in hand_objs:
@@ -588,12 +636,32 @@ def main(arg):
         "offset": [offset.x, offset.y, offset.z],
         "frames": []
     }
+    
     if saved_tf is not None:
         frames = saved_tf.get("frames", [])
         frames = sorted(frames, key=lambda fr: fr.get("file_path", ""))
         for i, fr in enumerate(frames):
             fov = float(fr["camera_angle_x"])
+            W = bpy.context.scene.render.resolution_x
+            H = bpy.context.scene.render.resolution_y
+            fx = 0.5 * W / math.tan(fov / 2.0)
+            fy = fx
+            cx = W / 2.0
+            cy = H / 2.0
+            K = [[fx, 0.0, cx],
+                [0.0, fy, cy],
+                [0.0, 0.0, 1.0]]
             cam.matrix_world = Matrix(fr["transform_matrix"])
+            T_world_cam = cam.matrix_world.copy()
+            T_world_obj = obj_root.matrix_world.copy()
+
+            # Blender camera coords: T_cam_obj_bl
+            T_cam_obj_bl = T_world_cam.inverted() @ T_world_obj
+
+            # PyTorch3D camera coords (match SAM3D pointmap convention): +Z forward
+            T_cam_obj_p3d = F_blcam_to_p3d @ T_cam_obj_bl
+
+            s_gt, q_gt, t_gt = sim3_from_matrix(T_cam_obj_p3d)
             cam.data.lens = (cam.data.sensor_width / 2.0) / math.tan(fov / 2.0)
 
             # output paths
@@ -609,6 +677,34 @@ def main(arg):
                 path = glob.glob(f'{output.file_slots[0].path}*.{ext}')
                 if path:
                     os.rename(path[0], f'{output.file_slots[0].path}.{ext}')
+                
+            set_render_visibility(hand_objs, hide=False)
+
+            bpy.context.scene.render.filepath = os.path.join(arg.output_folder, f"{i:03d}.png")
+            set_output_prefix(outputs, arg.output_folder, i, prefix="")  # -> 000_mask_1, 000_mask_2, etc.
+
+            bpy.ops.render.render(write_still=True)
+            bpy.context.view_layer.update()
+            finalize_output_files(outputs)
+
+            # -------------------------
+            # PASS 2: object-only (hide hand)
+            # -------------------------
+            set_render_visibility(hand_objs, hide=True)
+
+            # object-only RGB
+            bpy.context.scene.render.filepath = os.path.join(arg.output_folder, f"{i:03d}_objonly.png")
+
+            # object-only masks (and other outputs if enabled)
+            # IMPORTANT: use a different prefix so you don't overwrite combined outputs
+            set_output_prefix(outputs, arg.output_folder, i, prefix="objonly_")  # -> 000_objonly_mask_2, etc.
+
+            bpy.ops.render.render(write_still=True)
+            bpy.context.view_layer.update()
+            finalize_output_files(outputs)
+
+            # restore for next frame
+            set_render_visibility(hand_objs, hide=False)
             # set_render_visibility(hand_objs, hide=False)
             # set_outputs_muted(outputs, muted=False)
 
@@ -644,6 +740,19 @@ def main(arg):
                 "file_path": f'{i:03d}.png',
                 "camera_angle_x": fov,
                 "transform_matrix": fr["transform_matrix"],
+            })
+            to_export["frames"].append({
+                "T_world_cam": mat4_to_list(T_world_cam),
+
+                "intrinsics": {"W": W, "H": H, "K": K},
+
+                "gt_object": {
+                    "T_cam_obj": mat4_to_list(T_cam_obj_p3d),
+                    "scale": s_gt,
+                    "rotation_wxyz": q_gt,
+                    "translation": t_gt,
+                    "frame": "p3d_cam",
+                }
             })
     else:
         views = json.loads(arg.views)
