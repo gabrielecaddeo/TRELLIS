@@ -263,7 +263,7 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
         patchtokens = F.layer_norm(features, features.shape[-1:])
         return patchtokens
         
-    def get_cond(self, cond, mask_hand, mask_obj, cond_mask, x0_hand, touch, **kwargs) -> dict:
+    def get_cond(self, cond, mask_hand, mask_obj, cond_mask, x0_hand, touch, instance=None, frame_id=None, **kwargs) -> dict:
         """
         Get the conditioning information for the model.
 
@@ -286,6 +286,8 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
             "cond_mask": cond_mask_enc,
             "x0_hand": x0_hand.to(self.device),
             "touch": touch.to(self.device),
+            "instance": instance,
+            "frame_id": frame_id,
         }
 
         # Build the negative / unconditional versions
@@ -296,6 +298,8 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
             "cond_mask": torch.zeros_like(cond_mask_enc).to(self.device),
             "x0_hand": torch.zeros_like(x0_hand).to(self.device),
             "touch": torch.zeros_like(touch).to(self.device),
+            "instance": instance,
+            "frame_id": frame_id,
         }
         return {
             'cond': cond_dict,
@@ -356,6 +360,8 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
         # Sample occupancy latent
         flow_model = self.models['sparse_structure_flow_model']
         reso = flow_model.resolution
+        tau = 2.0/float(reso)
+        tau_vox = 0.5 * np.sqrt(3.0) * tau  # diagonal of a voxel
         # Decode occupancy latent
         decoder = self.models['sparse_structure_decoder']
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
@@ -368,15 +374,16 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
             cond,
             **sampler_params,
             verbose=True
-        )
+        ).samples
         
-        exit(0)
-        for i in range(len(z_s.pred_x_t)): # to decomment this, remover .samples from z_s
-            torch.save(torch.argwhere(decoder(z_s.pred_x_t[i])<=0)[:, [0, 2, 3, 4]].int(), f"/home/user/TRELLIS/coords_asym_velocity/00000{i}.pt")
+        # return 
+        # for i in range(len(z_s.pred_x_t)): # to decomment this, remover .samples from z_s
+        #     torch.save(torch.argwhere(decoder(z_s.pred_x_t[i])<=0)[:, [0, 2, 3, 4]].int(), f"/home/user/TRELLIS/coords_asym_velocity/00000{i}.pt")
         
-        coords = torch.argwhere(decoder(z_s)<=0)[:, [0, 2, 3, 4]].int()
-        # for i in range(coords.shape[0]):
-        #     pred_x_t
+        coords = decoder(z_s)
+        # coords = torch.argwhere(torch.abs(decoder(z_s))<=tau_vox)[:, [0, 2, 3, 4]].int()
+        # # for i in range(coords.shape[0]):
+        # #     pred_x_t
         return coords
 
     def sample_sparse_structure_optimization(
@@ -439,11 +446,26 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
         """
         ret = {}
         if 'mesh' in formats:
+            # w = self.models["slat_decoder_mesh"].out_layer.weight
+            # b = self.models["slat_decoder_mesh"].out_layer.bias
+            # print("out_layer |w| mean:", w.abs().mean().item(), " |b| mean:", b.abs().mean().item())
+            # dec = self.models["slat_decoder_mesh"]
+            # r0, r1 = dec.mesh_extractor.layouts["sdf"]["range"]
+            # b_sdf = dec.out_layer.bias[r0:r1].detach()
+            # w_sdf = dec.out_layer.weight[r0:r1].detach()
+
+            # print("b_sdf min/max/mean:", b_sdf.min().item(), b_sdf.max().item(), b_sdf.mean().item())
+            # print("|w_sdf| mean:", w_sdf.abs().mean().item())
+            # slat_vanilla = np.load('/home/user/TRELLIS/013_apple_f001.npz')
+            # zeros = torch.zeros(slat_vanilla['coords'].shape[0], 1, dtype=torch.int32)
+            # sparse_vanilla = sp.SparseTensor(feats=torch.tensor(slat_vanilla['feats']).float(), coords=torch.cat([zeros, torch.tensor(slat_vanilla['coords'], dtype=torch.int32)], dim=-1))
+            # print('ciao')
+            # ret['mesh'] = self.models['slat_decoder_mesh'](sparse_vanilla.to(self.device))
             ret['mesh'] = self.models['slat_decoder_mesh'](slat)
         if 'gaussian' in formats:
             ret['gaussian'] = self.models['slat_decoder_gs'](slat)
-        if 'radiance_field' in formats:
-            ret['radiance_field'] = self.models['slat_decoder_rf'](slat)
+        # if 'radiance_field' in formats:
+        #     ret['radiance_field'] = self.models['slat_decoder_rf'](slat)
         return ret
     
     def sample_slat(
@@ -470,6 +492,8 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
         slat = self.slat_sampler.sample(
             flow_model,
             noise,
+            # cond.get("cond",   None),
+            # neg_cond=cond.get('neg_cond', None),  # TODO: currently not using negative conditioning for slat sampling, can be added later if needed
             **cond,
             **sampler_params,
             verbose=True
@@ -553,9 +577,11 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
 
         dicts = self.get_cond(**data)
         coords = self.sample_sparse_structure_velocity(dicts, num_samples, sparse_structure_sampler_params)
-        exit(0)
-        slat = self.sample_slat(data, coords, slat_sampler_params)
-        return self.decode_slat(slat, formats)
+        # print(coords.shape)
+        return coords
+        # return
+        # slat = self.sample_slat(dicts, coords, slat_sampler_params)
+        # return self.decode_slat(slat, formats)
     
 
     

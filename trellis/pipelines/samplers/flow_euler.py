@@ -252,7 +252,7 @@ class FlowEulerSampler(Sampler):
         cond: dict | None = None,      # your conditioning (masks etc.)
         steps: int = 50,
         rescale_t: float = 1.0,
-        alpha_vel: float = 500,            # physics guidance strength
+        alpha_vel: float = 10,            # physics guidance strength
         delta: float = 2.0,            # contact band (voxels); set 0 to disable
         beta: float = 0.0,             # contact guidance weight (0 = off)
         save_path: str | None = None,  # where to torch.save the final SDF (optional)
@@ -280,6 +280,11 @@ class FlowEulerSampler(Sampler):
         # unpack condition bundle
         cond = cond or {}
         pos_cond = cond.get("cond",   None)      # positive CFG cond dict
+        instance_name = pos_cond.get("instance", "unknown_instance")  # for debugging/logging
+        view = pos_cond.get("frame_id", -1)  # for debugging/logging
+        print(instance_name)
+        print(view)
+        print(pos_cond.keys())
         neg_cond = cond.get("neg_cond", None)    # negative CFG cond dict
         x0_hand  = pos_cond.get("x0_hand", None)     # latent for hand
         touch    = pos_cond.get("touch",   None)     # [B, 1, 64, 64, 64] contact mask
@@ -288,7 +293,8 @@ class FlowEulerSampler(Sampler):
         if x0_hand is not None:
             with torch.no_grad():
                 sdf_hand = decoder(x0_hand)     # [B, 1, 64, 64, 64]
-                torch.save(sdf_hand, '/home/user/TRELLIS/coords_asym_velocity/hand_sdf.pt')
+                print('sdf_hand', sdf_hand.min().item(), sdf_hand.max().item(), sdf_hand.mean().item())
+                torch.save(sdf_hand, f'/home/user/TRELLIS/meshes_results_marching_cubes_2/{instance_name}/{view:02d}/hand_sdf.pt')
         else:
             sdf_hand = None
 
@@ -305,8 +311,8 @@ class FlowEulerSampler(Sampler):
         lambda_inter = 500
         lambda_contact = 50
         for step_i, (t, t_prev) in enumerate(t_pairs):
-            save_path=f'/home/user/TRELLIS/coords_asym_velocity/sdf_{step_i}.pt'
-            guidance_on = (step_i >= 15)
+            # save_path=f'/home/user/TRELLIS/coords_asym_velocity/sdf_{step_i}.pt'
+            guidance_on = (step_i >= 5)
             # 1) base vector field v_theta(x,t | cond)
             with torch.no_grad():
                 v = self._inference_model(model, x, t, pos_cond, neg_cond, **kwargs)  # shape = x
@@ -389,7 +395,8 @@ class FlowEulerSampler(Sampler):
         # decode final SDF once
         with torch.no_grad():
             final_sdf = decoder(x)
-        save_path='/home/user/TRELLIS/coords_asym_velocity/final_sdf.pt'
+            # print(final_sdf.min().item(), final_sdf.max().item(), final_sdf.mean().item())
+        save_path=f'/home/user/TRELLIS/meshes_results_marching_cubes_2/{instance_name}/{view:02d}/final_sdf.pt'
         if save_path is not None:
             torch.save(final_sdf, save_path)
             

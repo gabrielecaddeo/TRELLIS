@@ -1,3 +1,4 @@
+from fileinput import filename
 from typing import *
 import torch
 import torch.nn as nn
@@ -19,19 +20,19 @@ class Pipeline:
             model.eval()
 
     @staticmethod
-    def from_pretrained(path: str) -> "Pipeline":
+    def from_pretrained(path: str, filename:str ='pipeline') -> "Pipeline":
         """
         Load a pretrained model.
         """
         import os
         import json
-        is_local = os.path.exists(f"{path}/pipeline.json")
-
+        is_local = os.path.exists(f"{path}/{filename}.json")
+        print(f"Loading pipeline from {'local file' if is_local else 'Hugging Face Hub'}: {path}/{filename}.json")
         if is_local:
-            config_file = f"{path}/pipeline.json"
+            config_file = f"{path}/{filename}.json"
         else:
             from huggingface_hub import hf_hub_download
-            config_file = hf_hub_download(path, "pipeline.json")
+            config_file = hf_hub_download(path, "{filename}.json")
 
         with open(config_file, 'r') as f:
             args = json.load(f)['args']

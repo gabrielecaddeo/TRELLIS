@@ -6,7 +6,7 @@ import os
 
 
 class TestDatasetConditioned:
-    def __init__(self, image_size=518, latent_model: str = 'vae_ABO_HSSD_3D_rot_outer_rim_0140000'):
+    def __init__(self, image_size=518, latent_model: str = 'vae_final_all_resume_2_0300000'): #vae_ABO_HSSD_3D_rot_outer_rim_0140000/
         self.image_size = image_size
         self.latent_model = latent_model
     
