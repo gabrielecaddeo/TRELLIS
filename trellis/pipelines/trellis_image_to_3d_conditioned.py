@@ -367,11 +367,14 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
         # print(type(decoder))
+        # The ported (train-repo) sampler takes cond/neg_cond as separate dicts, not
+        # the {'cond': ..., 'neg_cond': ...} bundle the old in-repo version unpacked.
         z_s = self.sparse_structure_sampler.sample_velocity_conditioned(
             flow_model,
             noise,
             decoder,
-            cond,
+            cond['cond'],
+            neg_cond=cond['neg_cond'],
             **sampler_params,
             verbose=True
         ).samples

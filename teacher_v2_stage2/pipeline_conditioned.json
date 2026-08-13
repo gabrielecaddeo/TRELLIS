@@ -1,0 +1,58 @@
+{
+    "name": "TrellisImageTo3DPipeline",
+    "args": {
+        "models": {
+            "sparse_structure_decoder": "ckpts/decoder_ema0.9999_step0300000",
+            "sparse_structure_flow_model": "ckpts/denoiser_teacher_v2_final",
+            "slat_decoder_gs": "ckpts/decoder_slat_gs_ema0.9999_step0090000",
+            "slat_decoder_mesh": "ckpts/decoder_slat_mesh_ema0.9999_step0096000"
+        },
+        "sparse_structure_sampler": {
+            "name": "FlowEulerGuidanceIntervalSampler",
+            "args": {
+                "sigma_min": 1e-5
+            },
+            "params": {
+                "steps": 25,
+                "cfg_strength": 5.0,
+                "cfg_interval": [0.5, 1.0],
+                "rescale_t": 3.0
+            }
+        },
+        "slat_sampler": {
+            "name": "FlowEulerGuidanceIntervalSampler",
+            "args": {
+                "sigma_min": 1e-5
+            },
+            "params": {
+                "steps": 25,
+                "cfg_strength": 5.0,
+                "cfg_interval": [0.5, 1.0],
+                "rescale_t": 3.0
+            }
+        },
+        "slat_normalization": {
+            "mean": [
+                0.0994598,
+                0.18283977,
+                -2.32572269,
+                0.16636769,
+                0.11547173,
+                -0.73906959,
+                -1.24285572,
+                -1.30259283
+            ],
+            "std": [
+                2.24327619,
+                2.87729132,
+                2.72107236,
+                2.34918095,
+                2.92870279,
+                2.66805422,
+                2.09563299,
+                2.48329418
+            ]
+        },
+        "image_cond_model": "dinov2_vitl14_reg"
+    }
+}

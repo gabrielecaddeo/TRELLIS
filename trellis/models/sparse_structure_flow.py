@@ -103,7 +103,7 @@ class SparseStructureFlowModel(nn.Module):
             coords = torch.stack(coords, dim=-1).reshape(-1, 3)
             pos_emb = pos_embedder(coords)
             self.register_buffer("pos_emb", pos_emb)
-    
+
         self.input_layer = nn.Linear(in_channels * patch_size**3, model_channels)
             
         self.blocks = nn.ModuleList([
@@ -234,6 +234,11 @@ class SparseStructureFlowModelConditioned(nn.Module):
         use_encoding_hand: bool = False,
         use_weighted_attention: bool = False,
         use_touch: bool = False,
+        # Fixes 1a/1b (hand positional embeddings). True for teacher_v2 and later.
+        # Set False to faithfully run pre-fix checkpoints (e.g. the old teacher),
+        # whose forward never added a PE to the hand tokens or the hand mask, and
+        # whose state dicts have no mask_hand_pos_emb buffer.
+        use_hand_pe: bool = True,
         share_mod: bool = False,
         qk_rms_norm: bool = False,
         qk_rms_norm_cross: bool = False,
@@ -257,6 +262,7 @@ class SparseStructureFlowModelConditioned(nn.Module):
         self.dtype = torch.float16 if use_fp16 else torch.float32
         self.use_touch = use_touch
         self.use_encoding_hand = use_encoding_hand
+        self.use_hand_pe = use_hand_pe
 
         self.t_embedder = TimestepEmbedder(model_channels)
         if share_mod:
@@ -297,6 +303,18 @@ class SparseStructureFlowModelConditioned(nn.Module):
         self.out_layer = nn.Linear(model_channels, out_channels * patch_size**3)
 
         self.mask_hand_embedder = nn.Linear(1, self.cond_channels)
+        # mask_hand arrives as a [B, 37, 37] patch-coverage grid and is embedded by a
+        # Linear(1, C), which puts all 1369 tokens on a single affine line in feature
+        # space -- the branch could only convey a scalar summary of mask coverage. A 2-D
+        # APE over the DINOv2 patch grid gives each token a positional identity.
+        # 37 = 518 / 14, the DINOv2 patch count (see MaskPatcher).
+        if self.use_hand_pe:
+            mh_coords = torch.stack(
+                torch.meshgrid(torch.arange(37), torch.arange(37), indexing='ij'), dim=-1
+            ).reshape(-1, 2).float()
+            self.register_buffer(
+                "mask_hand_pos_emb", AbsolutePositionEmbedder(self.cond_channels, 2)(mh_coords)
+            )
 
         if self.use_touch:
             self.contact_encoder = ContactEncoder3D(c_in=2, c_out=in_channels)
@@ -350,12 +368,26 @@ class SparseStructureFlowModelConditioned(nn.Module):
         # Zero-out output layers:
         nn.init.constant_(self.out_layer.weight, 0)
         nn.init.constant_(self.out_layer.bias, 0)
-    
+
+        # Re-zero the new conditioning branches. ModulatedTransformerCrossBlockConditioned
+        # zero-inits cross_attn_{hand,mask_hand}.to_out in its own __init__, but that runs
+        # BEFORE this method, and the `self.apply(_basic_init)` above xavier-inits every
+        # nn.Linear in the model -- including those two. Without this, warm-starting from
+        # the pre-conditioning checkpoint injects randomly-weighted hand-branch output into
+        # the residual stream at step 0 instead of being an exact no-op.
+        for block in self.blocks:
+            for name in ('cross_attn_mask_hand', 'cross_attn_hand'):
+                attn = getattr(block, name, None)
+                if attn is not None:
+                    nn.init.constant_(attn.to_out.weight, 0)
+                    nn.init.constant_(attn.to_out.bias, 0)
+
     def initialize_input_layer_x0h(self) -> None:
         """
         Initialize the input layer for x0_hand with the same weights as the main input layer.
         """
-        self.input_layer_x0h.load_state_dict(self.input_layer.state_dict())
+        if self.use_encoding_hand:
+            self.input_layer_x0h.load_state_dict(self.input_layer.state_dict())
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: dict, **kwargs) -> torch.Tensor:
         assert [*x.shape] == [x.shape[0], self.in_channels, *[self.resolution] * 3], \
@@ -371,12 +403,19 @@ class SparseStructureFlowModelConditioned(nn.Module):
             t_emb = self.adaLN_modulation(t_emb)
         t_emb = t_emb.type(self.dtype)
         h = h.type(self.dtype)
-        cond['cond'] = cond['cond'].type(self.dtype)
-        cond['mask_obj'] = cond['mask_obj'].view(x.shape[0],-1,1).type(self.dtype)
+
+        # Build a fresh context dict rather than mutating the caller's `cond` in place:
+        # none of the transforms below are idempotent, so a cond dict reused across two
+        # forwards would be double-embedded (the pos_emb additions especially).
+        ctx = {}
+        ctx['cond'] = cond['cond'].type(self.dtype)
+        ctx['mask_obj'] = cond['mask_obj'].view(x.shape[0],-1,1).type(self.dtype)
         embedded_mask_hand = self.mask_hand_embedder(cond['mask_hand'].view(x.shape[0],-1,1))
-        cond['mask_hand'] = embedded_mask_hand.type(self.dtype)
-        
-        cond['cond_mask'] = cond['cond_mask'].type(self.dtype)
+        if self.use_hand_pe:
+            embedded_mask_hand = embedded_mask_hand + self.mask_hand_pos_emb[None]
+        ctx['mask_hand'] = embedded_mask_hand.type(self.dtype)
+
+        ctx['cond_mask'] = cond['cond_mask'].type(self.dtype)
 
         if self.use_encoding_hand:
             x0h = cond['x0_hand']               # [B, C, R, R, R]
@@ -387,15 +426,21 @@ class SparseStructureFlowModelConditioned(nn.Module):
                 fused = torch.cat([x0h, concat_feat], dim=1)  # [B, C+C', R, R, R]
                 x0h = self.fuse_x0_contact(fused)  # [B, C, R, R, R]
 
-            
+
             x0h_patches = patchify(x0h, self.patch_size)
             x0h_patches = x0h_patches.view(*x0h_patches.shape[:2], -1).permute(0, 2, 1).contiguous()
 
             x0h_tokens = self.input_layer_x0h(x0h_patches)
-            cond['x0_hand'] = x0h_tokens.type(self.dtype)  
+            # Without this, cross_attn_hand is permutation-invariant over the 4096 hand
+            # grid cells: the model gets a bag of local hand features and cannot tell
+            # *where* the hand is. Same pos_emb as the noisy-latent tokens, so the two
+            # token sets share a coordinate frame.
+            if self.pe_mode == "ape" and self.use_hand_pe:
+                x0h_tokens = x0h_tokens + self.pos_emb[None]
+            ctx['x0_hand'] = x0h_tokens.type(self.dtype)
 
         for block in self.blocks:
-            h = block(h, t_emb, cond)
+            h = block(h, t_emb, ctx)
         h = h.type(x.dtype)
         h = F.layer_norm(h, h.shape[-1:])
         h = self.out_layer(h)
