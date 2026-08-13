@@ -103,7 +103,7 @@ class SparseStructureFlowModel(nn.Module):
             coords = torch.stack(coords, dim=-1).reshape(-1, 3)
             pos_emb = pos_embedder(coords)
             self.register_buffer("pos_emb", pos_emb)
-
+    
         self.input_layer = nn.Linear(in_channels * patch_size**3, model_channels)
             
         self.blocks = nn.ModuleList([
@@ -273,7 +273,8 @@ class SparseStructureFlowModelConditioned(nn.Module):
             self.register_buffer("pos_emb", pos_emb)
 
         self.input_layer = nn.Linear(in_channels * patch_size**3, model_channels)
-        self.input_layer_x0h = nn.Linear(in_channels * patch_size**3, model_channels)
+        if self.use_encoding_hand:
+            self.input_layer_x0h = nn.Linear(in_channels * patch_size**3, model_channels)
 
         self.blocks = nn.ModuleList([
             ModulatedTransformerCrossBlockConditioned(

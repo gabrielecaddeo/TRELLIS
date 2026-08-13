@@ -243,6 +243,62 @@ class FlowEulerSampler(Sampler):
             torch.save(final_sdf, save_path)
         ret.samples = x.detach()
         return ret
+
+
+    def jitter_sdf_translation(
+            self,
+            sdf: torch.Tensor,          # [B,1,D,H,W]
+            p: float = 0.5,
+            max_shift: int = 1,
+            seed: int | None = None,
+            pad_value: float | None = None,
+    ):
+        """
+        With probability p (per sample), shift the SDF by an integer translation where
+        each axis _shift is in [-max_shift, +max_shift], excluding (0,0,0).
+        
+        Padding uses a large positive value (outside space) by default.
+        """
+        assert sdf.ndim == 5 and sdf.shape[1] == 1, f"expected [B,1,D,H,W], got {tuple(sdf.shape)}"
+        if max_shift <= 0 or p <= 0:
+            return sdf
+
+        B, C, D, H, W = sdf.shape
+        device = sdf.device
+        rng = torch.Generator(device="cpu")
+        if seed is not None:
+            rng.manual_seed(int(seed))
+            
+        # Choose a padding value: large positive -> "definitely outside"
+        if pad_value is None:
+            # one global pad value for this batch
+            pad_value = float(sdf.detach().max().item() + 1.0)
+
+        out = sdf.clone()
+
+        for b in range(B):
+            if torch.rand((), generator=rng).item() >= p:
+                continue
+
+            # sample non-zero (sd, sh, sw)
+            while True:
+                sd = int(torch.randint(-max_shift, max_shift + 1, (1,), generator=rng).item())
+                sh = int(torch.randint(-max_shift, max_shift + 1, (1,), generator=rng).item())
+                sw = int(torch.randint(-max_shift, max_shift + 1, (1,), generator=rng).item())
+                if (sd, sh, sw) != (0, 0, 0):
+                    break
+
+            pad = max_shift
+            vol = out[b:b+1]  # [1,1,D,H,W]
+            vol_pad = F.pad(vol, (pad, pad, pad, pad, pad, pad), mode="constant", value=pad_value)
+            
+            # Crop with offset. Positive sd means shift "forward" along D (dim=2).
+            d0 = pad - sd
+            h0 = pad - sh
+            w0 = pad - sw
+            out[b:b+1] = vol_pad[:, :, d0:d0+D, h0:h0+H, w0:w0+W]
+
+        return out
     
     def sample_velocity_conditioned(
         self,
@@ -293,8 +349,10 @@ class FlowEulerSampler(Sampler):
         if x0_hand is not None:
             with torch.no_grad():
                 sdf_hand = decoder(x0_hand)     # [B, 1, 64, 64, 64]
-                print('sdf_hand', sdf_hand.min().item(), sdf_hand.max().item(), sdf_hand.mean().item())
-                torch.save(sdf_hand, f'/home/user/TRELLIS/meshes_results_marching_cubes_2/{instance_name}/{view:02d}/hand_sdf.pt')
+                #print('sdf_hand', sdf_hand.min().item(), sdf_hand.max().item(), sdf_hand.mean().item())
+                #print("Shifting")
+                #sdf_hand = self.jitter_sdf_translation(sdf_hand, p=0.7, max_shift=2, seed=123 + view)
+                torch.save(sdf_hand, f'/projects/gcaddeo/inference/TRELLIS/meshes_results_marching_cubes_ablation_dex/{instance_name}/{view:02d}/hand_sdf.pt')
         else:
             sdf_hand = None
 
@@ -396,7 +454,7 @@ class FlowEulerSampler(Sampler):
         with torch.no_grad():
             final_sdf = decoder(x)
             # print(final_sdf.min().item(), final_sdf.max().item(), final_sdf.mean().item())
-        save_path=f'/home/user/TRELLIS/meshes_results_marching_cubes_2/{instance_name}/{view:02d}/final_sdf.pt'
+        save_path=f'/projects/gcaddeo/inference/TRELLIS/meshes_results_marching_cubes_ablation_dex/{instance_name}/{view:02d}/final_sdf.pt'
         if save_path is not None:
             torch.save(final_sdf, save_path)
             

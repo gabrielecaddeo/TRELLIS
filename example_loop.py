@@ -4,6 +4,8 @@ os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default
                                             # 'auto' is faster but will do benchmarking at the beginning.
                                             # Recommended to set to 'native' if run only once.
 
+import time
+import traceback
 import imageio
 from PIL import Image
 from trellis.pipelines import TrellisImageTo3DPipeline
@@ -21,7 +23,7 @@ import trimesh
 print(f"Instance name")
 # print(f"Running optimization for instance '{string_name}', view {view_id}")
 # Load a pipeline from a model folder or a Hugging Face model hub.
-pipeline = TrellisImageTo3DPipelineConditioned.from_pretrained("/home/user/.cache/huggingface/hub/models--microsoft--TRELLIS-image-large/snapshots/25e0d31ffbebe4b5a97464dd851910efc3002d96")
+pipeline = TrellisImageTo3DPipelineConditioned.from_pretrained("/projects/gcaddeo/inference/TRELLIS/25e0d31ffbebe4b5a97464dd851910efc3002d96")
 pipeline.cuda()
 
 def save_mesh(sdf, filename: str='ciao'):
@@ -69,22 +71,32 @@ torch.manual_seed(seed)
 #     sparse_structure_sampler_params=params,
 # )
 import glob
-folders = glob.glob('/home/user/TRELLIS/folders_amodal_2/*')
+folders = glob.glob('/projects/gcaddeo/inference/TRELLIS/folders_amodal_2/*')
 for folder in folders:
     string_name = os.path.basename(folder)
     for view_id in range(24):
-        print("alloc", torch.cuda.memory_allocated()/1e9, "GB",
-      "reserved", torch.cuda.memory_reserved()/1e9, "GB")
-        if os.path.exists(f"/home/user/TRELLIS/meshes_results_marching_cubes_2/{string_name}/{view_id:02d}/sample.ply"):
+        # print("alloc", torch.cuda.memory_allocated()/1e9, "GB",
+      # "reserved", torch.cuda.memory_reserved()/1e9, "GB")
+        if os.path.exists(f"/projects/gcaddeo/inference/TRELLIS/meshes_results_marching_cubes_ablation_no_phys/{string_name}/{view_id:02d}/sample.ply"):
             print(f"Skipping {string_name} view {view_id} as it already exists.")
+            #continue
+        os.makedirs(f"/projects/gcaddeo/inference/TRELLIS/meshes_results_marching_cubes_ablation_no_phys/{string_name}/{view_id:02d}", exist_ok=True)
+        try:
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            outputs = pipeline.run_velocity(
+                root='/projects/gcaddeo/train_flow/TRELLIS/datasets/Hands',
+                instance_name=string_name,
+                view=view_id,
+                seed=42)
+            torch.cuda.synchronize()
+            end = time.perf_counter()
+            print(f"[TIME] run_velocity {string_name} view {view_id:02d}: {end - start:.4f} seconds")
+        except:
+            print("problem")
+            traceback.print_exc()
             continue
-        os.makedirs(f"/home/user/TRELLIS/meshes_results_marching_cubes_2/{string_name}/{view_id:02d}", exist_ok=True)
-        outputs = pipeline.run_velocity(
-            root='/home/user/TRELLIS/datasets/Hands',
-            instance_name=string_name,
-            view=view_id,
-            seed=42)
-        save_mesh(outputs.squeeze(0,1).cpu().numpy(), filename=f"/home/user/TRELLIS/meshes_results_marching_cubes_2/{string_name}/{view_id:02d}/sample.ply")
+        save_mesh(outputs.squeeze(0,1).cpu().numpy(), filename=f"/projects/gcaddeo/inference/TRELLIS/meshes_results_marching_cubes_ablation_no_phys/{string_name}/{view_id:02d}/sample.ply")
         del outputs
         gc.collect()
         torch.cuda.empty_cache()

@@ -18,6 +18,7 @@ __attributes = {
     
     'SLatFlowModel': 'structured_latent_flow',
     'ElasticSLatFlowModel': 'structured_latent_flow',
+    'SLatFlowModelMaskAsCondWeighted': 'structured_latent_flow',
 }
 
 __submodules = []
@@ -51,7 +52,8 @@ def from_pretrained(path: str, **kwargs):
     import json
     from safetensors.torch import load_file
     is_local = os.path.exists(f"{path}.json") and os.path.exists(f"{path}.safetensors")
-
+    print(f"{path}.json")
+    print(f"{path}.safetensors")
     if is_local:
         config_file = f"{path}.json"
         model_file = f"{path}.safetensors"
@@ -97,4 +99,5 @@ if __name__ == '__main__':
     from .structured_latent_flow import (
         SLatFlowModel,
         ElasticSLatFlowModel,
+        SLatFlowModelMaskAsCondWeighted,
     )

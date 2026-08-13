@@ -36,7 +36,7 @@ def convert_pt_to_safetensors(pt_path: str, out_path: str):
 
 
 n = convert_pt_to_safetensors(
-    "/home/user/TRELLIS/outputs/flow_conditioned_all_losses/ckpts/denoiser_ema0.9999_step0018000.pt",
-    "/home/user/TRELLIS/outputs/flow_conditioned_all_losses/ckpts/denoiser_ema0.9999_step0018000.safetensors",
+    "/projects/gcaddeo/train_flow_conditioned/TRELLIS/outputs/flow_conditioned_no_losses_resume_24k/ckpts/denoiser_ema0.9999_step0032000.pt",
+    "/projects/gcaddeo/train_flow_conditioned/TRELLIS/outputs/flow_conditioned_no_losses_resume_24k/ckpts/denoiser_encoding_ema0.9999_step0032000.safetensors",
 )
 print("Saved tensors:", n)
