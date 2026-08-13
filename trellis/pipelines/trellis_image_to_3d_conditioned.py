@@ -377,13 +377,14 @@ class TrellisImageTo3DPipelineConditioned(Pipeline):
             neg_cond=cond['neg_cond'],
             **sampler_params,
             verbose=True
-        ).samples
-        
-        # return 
+        ).samples.detach()  # the ported sampler returns the guided latent grad-attached
+
+        # return
         # for i in range(len(z_s.pred_x_t)): # to decomment this, remover .samples from z_s
         #     torch.save(torch.argwhere(decoder(z_s.pred_x_t[i])<=0)[:, [0, 2, 3, 4]].int(), f"/home/user/TRELLIS/coords_asym_velocity/00000{i}.pt")
-        
-        coords = decoder(z_s)
+
+        with torch.no_grad():
+            coords = decoder(z_s)
         # coords = torch.argwhere(torch.abs(decoder(z_s))<=tau_vox)[:, [0, 2, 3, 4]].int()
         # # for i in range(coords.shape[0]):
         # #     pred_x_t
