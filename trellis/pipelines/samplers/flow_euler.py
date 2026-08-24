@@ -1,3 +1,4 @@
+
 from typing import *
 import torch
 import torch.nn as nn
@@ -12,6 +13,23 @@ from .classifier_free_guidance_mixin import ClassifierFreeGuidanceSamplerMixin
 from .guidance_interval_mixin import GuidanceIntervalSamplerMixin
 from torch.nn.utils import clip_grad_norm_
 import torch.utils.checkpoint as checkpoint
+def _set_requires_grad(module, flag: bool):
+    """Temporarily change requires_grad for all params; returns old flags."""
+    old = []
+    for p in module.parameters():
+        old.append(p.requires_grad)
+        p.requires_grad_(flag)
+    return old
+
+def _restore_requires_grad(module, old_flags):
+    for p, f in zip(module.parameters(), old_flags):
+        p.requires_grad_(f)
+
+def _norm_per_sample(g: torch.Tensor, eps=1e-8):
+    # g: [B, ...]
+    B = g.shape[0]
+    gn = g.view(B, -1).norm(dim=1).clamp_min(eps)
+    return g / gn.view(B, *([1] * (g.ndim - 1))), gn
 
 class FlowEulerSampler(Sampler):
     """
@@ -160,7 +178,7 @@ class FlowEulerSampler(Sampler):
         cond: dict | None = None,      # your conditioning (masks etc.)
         steps: int = 50,
         rescale_t: float = 1.0,
-        alpha_vel: float = 100000,            # physics guidance strength
+        alpha_vel: float = 5000,       # physics guidance strength; UNCALIBRATED for the corrected update -- sweep before trusting. 0 disables guidance.
         delta: float = 2.0,            # contact band (voxels); set 0 to disable
         beta: float = 0.0,             # contact guidance weight (0 = off)
         save_path: str | None = None,  # where to torch.save the final SDF (optional)
@@ -171,11 +189,17 @@ class FlowEulerSampler(Sampler):
         Guided Euler sampling: at each step, nudge the vector field with the
         gradient of a physics energy computed via the *frozen* decoder.
 
+        The energy is evaluated on the clean-object estimate x0_hat obtained from the
+        current velocity via _v_to_xstart_eps (the decoder is trained on clean latents,
+        so decoding the noisy interpolant x_t gives meaningless SDFs at high t -- the
+        same defect as training finding B). Guidance is additionally skipped for the
+        first `guidance_skip` steps, where x0_hat is still noise-dominated.
+
+        Set alpha_vel=0 to recover plain (unguided) Euler sampling exactly.
+
         Returns:
-            {"samples": latent, "final_sdf": sdf}
+            {"samples": latent, "pred_x_t": [...], "pred_x_0": [...]}
         """
-        # --- setup ---
-        print('inside 2')
         model.eval()
         decoder.eval()
         for p in model.parameters():   # model weights frozen for sampling
@@ -183,7 +207,9 @@ class FlowEulerSampler(Sampler):
         for p in decoder.parameters(): # decoder weights frozen, but we still need grads w.r.t. x
             p.requires_grad_(False)
 
-        # time schedule (same as yours, with rescale)
+        guidance_skip = int(kwargs.pop("guidance_skip", 5))
+
+        # time schedule (same as sample(), with rescale)
         t_seq = np.linspace(1.0, 0.0, steps + 1)
         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
         t_pairs = [(float(t_seq[i]), float(t_seq[i + 1])) for i in range(steps)]
@@ -191,47 +217,52 @@ class FlowEulerSampler(Sampler):
         # working latent
         x = noise.detach().clone()
 
-        # (optional) clamp/normalize hand SDF for stability
-        # e.g., truncate to a narrow band and scale to [-1, 1]
-        # tau = 8.0
-        # hand_sdf = hand_sdf.clamp(-tau, tau) / tau
         ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
-        alpha_vel = 5000
-        print('alpha=', alpha_vel)
-        for (t, t_prev) in t_pairs:
-            print('inside 3')
-            # 1) base vector field v_theta(x,t | cond)
-            x = x.detach().requires_grad_(True)  # grads w.r.t. x
-            v = self._inference_model(model, x, t, cond, **kwargs)  # shape = x
-            # pred_x_prev = x_t - (t - t_prev) * v
-            # 2) decode SDF and build physics energy
-            #    - interpenetration: penalize inside both hand and obj (negative SDFs)
-            S_obj = decoder(x)                                  # [B, 1, 64, 64, 64]
-            E_inter = (F.relu(-hand_sdf) * F.relu(-S_obj)).sum()
-
-            # optional: contact encouragement near hand surface (outside hand)
-            if beta > 0.0 and delta > 0.0:
-                band = (hand_sdf.abs() < delta) & (hand_sdf >= 0)
-                if band.any():
-                    # bring object surface (S_obj ~ 0) near hand surface in the band
-                    E_contact = F.smooth_l1_loss(S_obj[band], torch.zeros_like(S_obj[band]))
-                else:
-                    E_contact = S_obj.new_zeros(())
-                E = E_inter + beta * E_contact
-            else:
-                E = E_inter
-            print('E_inter', E_inter.item())
-            # print('Loss'E_inter.item())
-            # 3) physics gradient w.r.t. latent
-            g = torch.autograd.grad(E, x, retain_graph=False, create_graph=False)[0]
-            print("Grads",g.abs().mean().item(), g.abs().max().item())
-            # 4) guided Euler update: x_{t-Δ} = x_t + Δt * (v - α ∇E)
-            dt = t_prev - t
+        for step_i, (t, t_prev) in enumerate(t_pairs):
+            # 1) base vector field v_theta(x,t | cond). Computed without grad: the
+            #    energy gradient below flows only through x_t's direct affine path to
+            #    x0_hat (DPS-style approximation), not back through the model.
             with torch.no_grad():
-                x = x + dt * (v - alpha_vel * g)
-            ret.pred_x_t.append(x)
-            
-                
+                v = self._inference_model(model, x, t, cond, **kwargs)  # shape = x
+
+            guidance_on = alpha_vel > 0 and step_i >= guidance_skip
+            if guidance_on:
+                with torch.enable_grad():
+                    x = x.detach().requires_grad_(True)
+                    pred_x_0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
+
+                    # 2) physics energy on the decoded clean-object estimate
+                    S_obj = decoder(pred_x_0)                       # [B, 1, 64, 64, 64]
+                    E_inter = (F.relu(-hand_sdf) * F.relu(-S_obj)).sum()
+
+                    # optional: contact encouragement near hand surface (outside hand)
+                    if beta > 0.0 and delta > 0.0:
+                        band = (hand_sdf.abs() < delta) & (hand_sdf >= 0)
+                        if band.any():
+                            # bring object surface (S_obj ~ 0) near hand surface in the band
+                            E_contact = F.smooth_l1_loss(S_obj[band], torch.zeros_like(S_obj[band]))
+                        else:
+                            E_contact = S_obj.new_zeros(())
+                        E = E_inter + beta * E_contact
+                    else:
+                        E = E_inter
+
+                    # 3) physics gradient w.r.t. the latent
+                    g = torch.autograd.grad(E, x, retain_graph=False, create_graph=False)[0]
+            else:
+                with torch.no_grad():
+                    pred_x_0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
+                g = torch.zeros_like(x)
+
+            # 4) guided Euler update: x_{t_prev} = x_t - (t - t_prev) * (v + alpha * grad E)
+            #    (t_prev < t, so dt > 0; the -alpha*g term descends the energy)
+            dt = t - t_prev
+            with torch.no_grad():
+                x = x - dt * (v + alpha_vel * g)
+
+            ret.pred_x_t.append(x.detach())
+            ret.pred_x_0.append(pred_x_0.detach())
+
             if verbose and (not torch.isfinite(x).all()):
                 print("Warning: non-finite values in x during guided Euler.")
 
@@ -250,9 +281,10 @@ class FlowEulerSampler(Sampler):
         noise,                         # latent init: [B, 8, 16, 16, 16]
         decoder,                       # frozen decoder: latent -> SDF [B, 1, 64, 64, 64]
         cond: dict | None = None,      # your conditioning (masks etc.)
+        neg_cond: dict | None = None,
         steps: int = 50,
         rescale_t: float = 1.0,
-        alpha_vel: float = 10,            # physics guidance strength
+        alpha_vel: float = 10,         # physics guidance strength (matches the operative inference-repo value); 0 disables guidance exactly
         delta: float = 2.0,            # contact band (voxels); set 0 to disable
         beta: float = 0.0,             # contact guidance weight (0 = off)
         save_path: str | None = None,  # where to torch.save the final SDF (optional)
@@ -272,20 +304,16 @@ class FlowEulerSampler(Sampler):
         decoder.eval()
 
         # we do NOT want to train model/decoder weights during sampling
-        for p in model.parameters():
-            p.requires_grad_(False)
-        for p in decoder.parameters():
-            p.requires_grad_(False)
+        #for p in model.parameters():
+        #    p.requires_grad_(False)
+        #for p in decoder.parameters():
+        #    p.requires_grad_(False)
 
         # unpack condition bundle
         cond = cond or {}
-        pos_cond = cond.get("cond",   None)      # positive CFG cond dict
-        instance_name = pos_cond.get("instance", "unknown_instance")  # for debugging/logging
-        view = pos_cond.get("frame_id", -1)  # for debugging/logging
-        print(instance_name)
-        print(view)
-        print(pos_cond.keys())
-        neg_cond = cond.get("neg_cond", None)    # negative CFG cond dict
+        pos_cond = cond
+        
+        print(type(pos_cond))
         x0_hand  = pos_cond.get("x0_hand", None)     # latent for hand
         touch    = pos_cond.get("touch",   None)     # [B, 1, 64, 64, 64] contact mask
 
@@ -293,8 +321,7 @@ class FlowEulerSampler(Sampler):
         if x0_hand is not None:
             with torch.no_grad():
                 sdf_hand = decoder(x0_hand)     # [B, 1, 64, 64, 64]
-                print('sdf_hand', sdf_hand.min().item(), sdf_hand.max().item(), sdf_hand.mean().item())
-                torch.save(sdf_hand, f'/home/user/TRELLIS/meshes_results_marching_cubes_2/{instance_name}/{view:02d}/hand_sdf.pt')
+                #torch.save(sdf_hand, '/home/user/TRELLIS/coords_asym_velocity/hand_sdf.pt')
         else:
             sdf_hand = None
 
@@ -310,49 +337,51 @@ class FlowEulerSampler(Sampler):
         
         lambda_inter = 500
         lambda_contact = 50
+        guidance_skip = int(kwargs.pop("guidance_skip", 5))  # x0_hat is noise-dominated in the first steps
         for step_i, (t, t_prev) in enumerate(t_pairs):
-            # save_path=f'/home/user/TRELLIS/coords_asym_velocity/sdf_{step_i}.pt'
-            guidance_on = (step_i >= 5)
+            guidance_on = alpha_vel > 0 and step_i >= guidance_skip
             # 1) base vector field v_theta(x,t | cond)
             with torch.no_grad():
                 v = self._inference_model(model, x, t, pos_cond, neg_cond, **kwargs)  # shape = x
             if guidance_on:
-                x = x.detach().requires_grad_(True)  # grads w.r.t. x
-                pred_x_0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
+                print('guidance')
+                with torch.enable_grad():
+                    x = x.detach().requires_grad_(True)  # grads w.r.t. x
+                    pred_x_0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
+                    
+                    # ---- 2) build E_sdf(x) ~ lambda_ni * ni_loss + lambda_contact * contact_loss ----
+                    E = x.new_zeros([])
+                    sdf_obj = decoder(pred_x_0)              # [B, 1, 64, 64, 64] (requires grad wrt x)
+                    # save intermediate SDFs for visualization/debugging
+                    if save_path is not None:
+                        torch.save(sdf_obj, save_path)
+                    obj_inside  = torch.clamp(-sdf_obj,  0.0, 0.1)
+                    hand_inside = torch.clamp(-sdf_hand, 0.0, 0.1)                                  # [B, 1, 64, 64, 64]
+                    interpenetration = obj_inside * hand_inside
+                    pen_mask = (obj_inside > 0) & (hand_inside > 0)
+                    
+                    B = interpenetration.shape[0]
+                    num = (interpenetration * pen_mask).view(B, -1).sum(dim=1)
+                    den = pen_mask.view(B, -1).sum(dim=1).clamp_min(1)
+                    ni_per_sample = num / den
+                    ni_loss = ni_per_sample.mean()
+                    
+                    E = E + lambda_inter * ni_loss
+                    contact_mask = touch[:, 0]                 # [B, 64, 64, 64]
+                    contact_sdf  = contact_mask * sdf_obj.abs()
+                    
+                    B = contact_sdf.shape[0]
+                    num   = contact_sdf.view(B, -1).sum(dim=1)
+                    denom = contact_mask.view(B, -1).sum(dim=1).clamp_min(1)
+                    
+                    per_sample_loss = num / denom
+                    contact_loss = per_sample_loss.mean()
 
-                # ---- 2) build E_sdf(x) ~ lambda_ni * ni_loss + lambda_contact * contact_loss ----
-                E = x.new_zeros([])
-                sdf_obj = decoder(pred_x_0)              # [B, 1, 64, 64, 64] (requires grad wrt x)
-                # save intermediate SDFs for visualization/debugging
-                if save_path is not None:
-                    torch.save(sdf_obj, save_path)
-                obj_inside  = torch.clamp(-sdf_obj,  0.0, 0.1)
-                hand_inside = torch.clamp(-sdf_hand, 0.0, 0.1)                                  # [B, 1, 64, 64, 64]
-                interpenetration = obj_inside * hand_inside
-                pen_mask = (obj_inside > 0) & (hand_inside > 0)
-
-                B = interpenetration.shape[0]
-                num = (interpenetration * pen_mask).view(B, -1).sum(dim=1)
-                den = pen_mask.view(B, -1).sum(dim=1).clamp_min(1)
-                ni_per_sample = num / den
-                ni_loss = ni_per_sample.mean()
-
-                E = E + lambda_inter * ni_loss
-                contact_mask = touch[:, 0]                 # [B, 64, 64, 64]
-                contact_sdf  = contact_mask * sdf_obj.abs()
-
-                B = contact_sdf.shape[0]
-                num   = contact_sdf.view(B, -1).sum(dim=1)
-                denom = contact_mask.view(B, -1).sum(dim=1).clamp_min(1)
-
-                per_sample_loss = num / denom
-                contact_loss = per_sample_loss.mean()
-
-                E = E + lambda_contact * contact_loss
-                # print('Loss'E_inter.item())
-                # 3) physics gradient w.r.t. latent
-                
-                g = torch.autograd.grad(E, x, retain_graph=False, create_graph=False)[0]
+                    E = E + lambda_contact * contact_loss
+                    # print('Loss'E_inter.item())
+                    # 3) physics gradient w.r.t. latent
+                    
+                    g = torch.autograd.grad(E, x, retain_graph=False, create_graph=False)[0]
             else:
                 # no physics term active
                 pred_x_0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
@@ -383,25 +412,711 @@ class FlowEulerSampler(Sampler):
             g_step = (dt * alpha_vel * g).norm().item()
             x_norm = x.norm().item()
 
-            print(f"dt={dt:.4f} |x|={x_norm:.3e} |dt*v|={v_step:.3e} |dt*alpha*g|={g_step:.3e} ratio={g_step/(v_step+1e-12):.3e}")
-            print("finite after update?", torch.isfinite(x).all().item(), "max|x|", x.abs().max().item())
-            print("pred_x_0.requires_grad", pred_x_0.requires_grad)
+            #print(f"dt={dt:.4f} |x|={x_norm:.3e} |dt*v|={v_step:.3e} |dt*alpha*g|={g_step:.3e} ratio={g_step/(v_step+1e-12):.3e}")
+            #print("finite after update?", torch.isfinite(x).all().item(), "max|x|", x.abs().max().item())
+            #print("pred_x_0.requires_grad", pred_x_0.requires_grad)
             # print("sdf_obj.requires_grad", sdf_obj.requires_grad)
             # print("E.requires_grad", E.requires_grad)
-            if verbose and (not torch.isfinite(x).all()):
-                print("Warning: non-finite values in x during guided Euler.")
+            #if verbose and (not torch.isfinite(x).all()):
+                #print("Warning: non-finite values in x during guided Euler.")
                 # you might want to break or clamp here in practice
         
         # decode final SDF once
         with torch.no_grad():
             final_sdf = decoder(x)
-            # print(final_sdf.min().item(), final_sdf.max().item(), final_sdf.mean().item())
-        save_path=f'/home/user/TRELLIS/meshes_results_marching_cubes_2/{instance_name}/{view:02d}/final_sdf.pt'
+        #save_path='/home/user/TRELLIS/coords_asym_velocity/final_sdf.pt'
         if save_path is not None:
             torch.save(final_sdf, save_path)
             
         ret.samples = x.detach()
         return ret
+
+
+    # ------------------------------------------------------------------
+    # Improved physics guidance (greedy) and complete OC-Flow.
+    # Both use _physics_energy_per_sample below, so a/b comparisons isolate
+    # the optimizer (greedy vs trajectory-level OC) from the cost definition.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _physics_energy_per_sample(sdf_obj, sdf_hand, touch,
+                                   contact_floor=0.011, ni_margin=0.0,
+                                   contact_band=0.05):
+        """Per-sample (ni, contact) physics energies for sampling-time guidance.
+
+        Fixes over the original guidance energy:
+          - NI is normalized by hand-interior mass (extent-sensitive): removing
+            penetrated volume reduces it, not just making penetration shallower.
+            relu() makes it exactly zero -- gradient included -- for samples with
+            no penetration, so NI guidance is inherently violation-triggered.
+          - Contact is hinged at the measured decoder floor: a *perfect* latent
+            scores ~0.011 mean |sdf| at the annotated contact voxels through this
+            frozen decoder (TEACHER_RETRAIN.md §8.1), so pulling below that is
+            over-sharpening past the truth. The hinge also zeroes the term (and
+            its gradient) on already-correct samples -> violation-triggered.
+          - Contact voxels inside the hand are excluded and |sdf| is band-limited,
+            as in sample_velocity_conditioned_oc2.
+        """
+        B = sdf_obj.shape[0]
+        hand_in = (sdf_hand < -ni_margin).float()                    # [B,1,D,H,W]
+        obj_pen = F.relu(ni_margin - sdf_obj)                        # depth of violation
+        ni_ps = (obj_pen * hand_in).view(B, -1).sum(dim=1) \
+            / hand_in.view(B, -1).sum(dim=1).clamp_min(1.0)
+
+        outside = (sdf_hand[:, 0] > 0).float()                       # [B,D,H,W]
+        contact_w = touch[:, 0].float() * outside
+        abs_sdf = sdf_obj[:, 0].abs().clamp(max=contact_band)
+        c_raw = (contact_w * abs_sdf).view(B, -1).sum(dim=1) \
+            / contact_w.view(B, -1).sum(dim=1).clamp_min(1.0)
+        contact_ps = F.relu(c_raw - contact_floor)
+        return ni_ps, contact_ps
+
+    def sample_guided_v2(
+        self,
+        model,
+        noise,
+        decoder,
+        cond: dict | None = None,
+        neg_cond: dict | None = None,
+        steps: int = 50,
+        rescale_t: float = 1.0,
+        # guidance strength: correction norm = rho * (1-t)^time_power * ||v||,
+        # per sample -- relative to the velocity instead of an absolute alpha.
+        rho: float = 0.2,
+        time_power: float = 1.0,
+        guidance_skip: int = 5,
+        lambda_inter: float = 500.0,
+        lambda_contact: float = 50.0,
+        contact_floor: float = 0.011,
+        ni_margin: float = 0.0,
+        contact_band: float = 0.05,
+        verbose: bool = True,
+        **kwargs
+    ):
+        """Greedy (per-step) physics guidance with the fixed energy and a
+        relative, t-weighted trust region. DPS-style: the energy is evaluated on
+        x0_hat = f(x_t, v) with v detached, so gradients flow only through the
+        direct affine path (no backprop through the model). rho=0 recovers plain
+        Euler exactly; so does any sample whose energies sit at/below their floors.
+        """
+        model.eval()
+        decoder.eval()
+        cond = cond or {}
+        x0_hand = cond.get("x0_hand", None)
+        touch = cond.get("touch", None)
+        assert x0_hand is not None and touch is not None, \
+            "sample_guided_v2 needs x0_hand and touch in the positive cond"
+        with torch.no_grad():
+            sdf_hand = decoder(x0_hand).float()
+
+        t_seq = np.linspace(1.0, 0.0, steps + 1)
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = [(float(t_seq[i]), float(t_seq[i + 1])) for i in range(steps)]
+
+        x = noise.detach().clone()
+        B = x.shape[0]
+        expand = (B,) + (1,) * (x.ndim - 1)
+        ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+
+        for step_i, (t, t_prev) in enumerate(t_pairs):
+            with torch.no_grad():
+                v = self._inference_model(model, x, t, cond, neg_cond, **kwargs)
+
+            guidance_on = rho > 0 and step_i >= guidance_skip
+            if guidance_on:
+                with torch.enable_grad():
+                    x_var = x.detach().requires_grad_(True)
+                    pred_x0, _ = self._v_to_xstart_eps(x_t=x_var, t=t, v=v)
+                    sdf_obj = decoder(pred_x0)
+                    ni_ps, c_ps = self._physics_energy_per_sample(
+                        sdf_obj, sdf_hand, touch,
+                        contact_floor=contact_floor, ni_margin=ni_margin,
+                        contact_band=contact_band)
+                    E = (lambda_inter * ni_ps + lambda_contact * c_ps).sum()
+                    g = torch.autograd.grad(E, x_var)[0]
+                with torch.no_grad():
+                    pred_x0 = pred_x0.detach()
+                    g_norm = g.view(B, -1).norm(dim=1)
+                    v_norm = v.view(B, -1).norm(dim=1)
+                    w = rho * (1.0 - t) ** time_power
+                    scale = torch.where(
+                        g_norm > 1e-8,
+                        w * v_norm / g_norm.clamp_min(1e-8),
+                        torch.zeros_like(g_norm))
+                    u = g * scale.view(expand)
+            else:
+                with torch.no_grad():
+                    pred_x0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
+                u = torch.zeros_like(x)
+
+            dt = t - t_prev
+            with torch.no_grad():
+                x = x - dt * (v + u)
+            ret.pred_x_t.append(x.detach())
+            ret.pred_x_0.append(pred_x0)
+
+        ret.samples = x.detach()
+        return ret
+
+    def sample_oc_flow(
+        self,
+        model,
+        noise,
+        decoder,
+        cond: dict | None = None,
+        neg_cond: dict | None = None,
+        steps: int = 25,
+        rescale_t: float = 1.0,
+        # outer-loop optimal control
+        n_outer: int = 4,
+        eta_u: float = 0.5,          # control learning rate (per-sample normalized)
+        u_decay: float = 1.0,        # 1.0 = no control regularization between iters
+        u_max_ratio: float = 0.3,    # trust region: ||u_i|| <= ratio * ||v_i||
+        use_model_jacobian: bool = True,
+        lambda_inter: float = 500.0,
+        lambda_contact: float = 50.0,
+        contact_floor: float = 0.011,
+        ni_margin: float = 0.0,
+        contact_band: float = 0.05,
+        verbose: bool = True,
+        **kwargs
+    ):
+        """Complete OC-Flow (discrete adjoint): optimize per-step controls u_i over
+        the WHOLE trajectory against the terminal physics cost, with outer
+        iterations.
+
+            rollout:   x_{i+1} = x_i - dt_i * (v(x_i, t_i) + u_i)
+            terminal:  E = E_phys(decoder(x_K))              (x_K is the clean sample)
+            adjoint:   a_K = dE/dx_K,
+                       a_i = a_{i+1} - dt_i * (dv/dx|_{x_i})^T a_{i+1}   (VJP)
+            update:    u_i <- u_decay * u_i + eta_u * dt_i * a_{i+1}, trust-regioned
+
+        Each outer iteration costs one rollout plus one VJP (model fwd+bwd) per
+        step, so it is ~2*n_outer times the price of greedy guidance. Set
+        use_model_jacobian=False to skip the VJPs (a_i = a_K for all i), which is
+        the FlowGrad-style straight-through approximation.
+
+        Uses the same fixed physics energy as sample_guided_v2, so differences in
+        the a/b are attributable to the optimizer, not the cost.
+        """
+        model.eval()
+        decoder.eval()
+        cond = cond or {}
+        x0_hand = cond.get("x0_hand", None)
+        touch = cond.get("touch", None)
+        assert x0_hand is not None and touch is not None, \
+            "sample_oc_flow needs x0_hand and touch in the positive cond"
+        with torch.no_grad():
+            sdf_hand = decoder(x0_hand).float()
+
+        t_seq = np.linspace(1.0, 0.0, steps + 1)
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = [(float(t_seq[i]), float(t_seq[i + 1])) for i in range(steps)]
+        dts = [t - tp for (t, tp) in t_pairs]
+
+        x0 = noise.detach().clone()
+        B = x0.shape[0]
+        expand = (B,) + (1,) * (x0.ndim - 1)
+        u = [torch.zeros_like(x0) for _ in range(steps)]
+
+        def energy(x_final_var):
+            sdf_obj = decoder(x_final_var)
+            ni_ps, c_ps = self._physics_energy_per_sample(
+                sdf_obj, sdf_hand, touch,
+                contact_floor=contact_floor, ni_margin=ni_margin,
+                contact_band=contact_band)
+            return (lambda_inter * ni_ps + lambda_contact * c_ps).sum(), ni_ps, c_ps
+
+        x_final = None
+        for it in range(n_outer + 1):
+            # ---- rollout with current controls (also the final, u-frozen pass) ----
+            xs, v_norms = [], []
+            x = x0
+            with torch.no_grad():
+                for i, (t, t_prev) in enumerate(t_pairs):
+                    xs.append(x)
+                    v = self._inference_model(model, x, t, cond, neg_cond, **kwargs)
+                    v_norms.append(v.view(B, -1).norm(dim=1))
+                    x = x - dts[i] * (v + u[i])
+            x_final = x
+            if it == n_outer:
+                break
+
+            # ---- terminal cost and its gradient ----
+            with torch.enable_grad():
+                xK = x_final.detach().requires_grad_(True)
+                E, ni_ps, c_ps = energy(xK)
+                aK = torch.autograd.grad(E, xK)[0]
+            if verbose:
+                print(f"  [oc-flow] outer {it + 1}/{n_outer}: "
+                      f"E={float(E):.5g} ni={float(ni_ps.mean()):.4g} "
+                      f"contact={float(c_ps.mean()):.4g}")
+            if float(E) == 0.0:
+                break  # every sample at/below its floor -- nothing to optimize
+
+            # ---- adjoint backward + control update ----
+            a = aK
+            for i in reversed(range(steps)):
+                # descent on E: u_i <- u_decay*u_i - eta*dE/du_i, dE/du_i = -dt_i*a_{i+1}
+                with torch.no_grad():
+                    a_norm = a.view(B, -1).norm(dim=1)
+                    step_dir = a * torch.where(
+                        a_norm > 1e-8,
+                        v_norms[i] / a_norm.clamp_min(1e-8),
+                        torch.zeros_like(a_norm)).view(expand)
+                    u[i] = u_decay * u[i] + eta_u * dts[i] * step_dir
+                    # trust region against this rollout's velocity norm
+                    un = u[i].view(B, -1).norm(dim=1)
+                    cap = (u_max_ratio * v_norms[i] / un.clamp_min(1e-8)).clamp(max=1.0)
+                    u[i] = u[i] * cap.view(expand)
+
+                if i > 0 and use_model_jacobian:
+                    with torch.enable_grad():
+                        xi = xs[i].detach().requires_grad_(True)
+                        vi = self._inference_model(model, xi, t_pairs[i][0], cond,
+                                                   neg_cond, **kwargs)
+                        vjp = torch.autograd.grad((vi * a.detach()).sum(), xi)[0]
+                    a = a - dts[i] * vjp
+
+        ret = edict({"samples": x_final.detach(), "pred_x_t": [], "pred_x_0": []})
+        return ret
+
+    def sample_velocity_conditioned_oc2(
+            self,
+            model,
+            noise,
+            decoder,
+            cond: dict | None = None,        # pos
+            neg_cond: dict | None = None,    # neg
+            steps: int = 50,
+            rescale_t: float = 1.0,
+            cfg_strength: float = 3.0,
+        
+            # OC / guidance
+            guidance_start: int = 10,
+            theta_lr: float = 0.2,           # how fast theta follows gradients
+            theta_decay: float = 0.9,        # EMA decay
+            theta_max_ratio: float = 0.6,    # ||theta|| <= ratio * ||v||
+            # gradient scaling (helps when grads are tiny)
+            target_g: float = 20.0,          # desired per-sample ||g|| after mixing
+            max_g_scale: float = 50.0,       # cap for amplification
+            
+            # losses
+            lambda_inter: float = 500.0,
+            lambda_contact: float = 50.0,
+            
+            # smooth gates / band
+            tau: float = 0.05,               # gate sharpness for hand inside/outside
+            contact_band: float = 0.05,      # clamp |sdf| in contact to avoid huge far-field influence
+            
+            # safety
+            project_contact_descent: bool = True,  # enforce dirder(contact) <= 0
+            verbose: bool = True,
+            **kwargs
+    ):
+        """
+        OC-style guidance for flow matching sampling:
+        x_{t_prev} = x_t - dt * ( v_theta(x_t,t) + theta_t )
+        where theta_t is an auxiliary control updated from ∇_x losses computed through
+        pred_x0 = f(x_t, v(x_t,t)) and the frozen decoder.
+        
+        IMPORTANT SIGN:
+        Because update uses x <- x - dt*(...), to *decrease* a loss L, you want
+        theta to align with +∇_x L (so that -dt*theta is a descent step).
+        """
+        
+        model.eval()
+        decoder.eval()
+        cond = cond or {}
+        neg_cond = neg_cond or None
+        
+        # pull hand + touch from positive cond
+        x0_hand = cond.get("x0_hand", None)
+        touch   = cond.get("touch", None)
+    
+        # precompute hand sdf once (no grad)
+        sdf_hand = None
+        if x0_hand is not None:
+            with torch.no_grad():
+                sdf_hand = decoder(x0_hand)  # [B,1,64,64,64]
+
+        # time schedule t: 1 -> 0
+        t_seq = np.linspace(1.0, 0.0, steps + 1)
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = [(float(t_seq[i]), float(t_seq[i + 1])) for i in range(steps)]
+        
+        x = noise.detach().clone()
+        theta = torch.zeros_like(x)
+        
+        ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+        
+        # Freeze weights *temporarily* to save memory, but restore afterwards
+        old_model_flags = _set_requires_grad(model, False)
+        old_dec_flags   = _set_requires_grad(decoder, False)
+
+        try:
+            for step_i, (t, t_prev) in enumerate(t_pairs):
+                dt = (t - t_prev)  # positive (since t > t_prev)
+                guidance_on = (
+                    step_i >= guidance_start
+                    and (sdf_hand is not None)
+                    and (touch is not None)
+                )
+                print(step_i)
+                if not guidance_on:
+                    # No grads anywhere
+                    with torch.no_grad():
+                        v = self._inference_model(model, x, t, cond, neg_cond, cfg_strength, **kwargs)
+                        # if neg_cond is not None and cfg_strength is not None and cfg_strength != 0.0:
+                        #     v_neg = self._inference_model(model, x, t, neg_cond, **kwargs)
+                        #     v = v_pos + cfg_strength * (v_pos - v_neg)
+                        # else:
+                        #     v = v_pos
+
+                        theta.mul_(theta_decay)
+                        x = x - dt * (v + theta)
+
+                    ret.pred_x_t.append(x.detach())
+                    # store pred_x0 for debugging/vis if you want
+                    with torch.no_grad():
+                        pred_x0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
+                    ret.pred_x_0.append(pred_x0.detach())
+                    continue
+
+                # --- Guidance ON: grad wrt x only ---
+                x_var = x.detach().requires_grad_(True)
+                
+                # CFG velocity on x_var (so ∂v/∂x exists if you want OC sensitivity)
+                v = self._inference_model(model, x_var, t, cond, neg_cond, cfg_strength, **kwargs)
+                #if neg_cond is not None and cfg_strength is not None and cfg_strength != 0.0:
+                #    v_neg = self._inference_model(model, x_var, t, neg_cond, **kwargs)
+                #    v = v_pos + cfg_strength * (v_pos - v_neg)
+                #else:
+                #    v = v_pos
+
+                # map (x_t, v) -> pred_x0
+                pred_x0, _ = self._v_to_xstart_eps(x_t=x_var, t=t, v=v)
+                sdf_obj = decoder(pred_x0)  # [B,1,64,64,64]
+                
+                B = sdf_obj.shape[0]
+                
+                # -------------------------
+                # Non-interpenetration loss (non-saturating)
+                # -------------------------
+                # hand_in ~ 1 inside hand, 0 outside (smooth)
+                hand_in = torch.sigmoid(-sdf_hand / tau)     # [B,1,D,H,W]
+                # penalize negative sdf in object (penetration depth)
+                obj_pen = torch.relu(-sdf_obj)               # [B,1,D,H,W]
+                
+                num_ni = (obj_pen * hand_in).view(B, -1).sum(dim=1)
+                den_ni = hand_in.view(B, -1).sum(dim=1).clamp_min(1.0)
+                ni_loss = (num_ni / den_ni).mean()
+                
+                # -------------------------
+                # Contact loss (only outside hand + banded |sdf|)
+                # -------------------------
+                outside = torch.sigmoid(sdf_hand / tau)      # ~1 outside
+                contact_mask = touch[:, 0]                   # [B,D,H,W]
+                contact_w = contact_mask * outside[:, 0]     # [B,D,H,W]
+                
+                abs_sdf = sdf_obj.abs()
+                abs_sdf = torch.clamp(abs_sdf, 0.0, contact_band)  # banded
+                contact_sdf = contact_w * abs_sdf[:, 0]            # [B,D,H,W]
+                
+                num_c = contact_sdf.view(B, -1).sum(dim=1)
+                den_c = contact_w.view(B, -1).sum(dim=1).clamp_min(1.0)
+                contact_loss = (num_c / den_c).mean()
+                
+                # gradients wrt x_var (separate)
+                g_ni = torch.autograd.grad(ni_loss, x_var, retain_graph=True, create_graph=False)[0]
+                g_c  = torch.autograd.grad(contact_loss, x_var, retain_graph=True, create_graph=False)[0]
+                
+                # normalize per-sample then mix with lambdas (this prevents one term dominating by scale)
+                g_ni_n, _ = _norm_per_sample(g_ni)
+                g_c_n,  _ = _norm_per_sample(g_c)
+                g = (lambda_inter * g_ni_n) + (lambda_contact * g_c_n)
+                
+                # optional: amplify when small, but cap
+                g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
+                g_n, gnorm = _norm_per_sample(g)
+                # g_n has per-sample norm 1; scale it to target_g
+                scale = (target_g / gnorm.view(B, *([1]*(g.ndim-1)))).clamp(max=max_g_scale)
+                g = g * scale
+                
+                # -------------------------
+                # Update theta (SIGN!)
+                # -------------------------
+                # Because x <- x - dt*(v + theta),
+                # to do descent on E you want theta ~ +∇E (so -dt*theta is -∇E step).
+                with torch.no_grad():
+                    theta.mul_(theta_decay).add_(theta_lr * g)
+
+                    # trust region: ||theta|| <= ratio * ||v||
+                    v_det = v.detach()
+                    v_norm = v_det.view(B, -1).norm(dim=1).clamp_min(1e-8)
+                    th_norm = theta.view(B, -1).norm(dim=1).clamp_min(1e-8)
+                    max_th = theta_max_ratio * v_norm
+                    th_scale = (max_th / th_norm).clamp(max=1.0).view(B, *([1]*(theta.ndim-1)))
+                    theta.mul_(th_scale)
+                    
+                    # -------------------------
+                    # Projection: enforce contact descent (correct sign)
+                    # -------------------------
+                    # Your directional derivative print is:
+                    #   dirder_contact = <∇contact, step_dir> where step_dir = - (v + theta)
+                    # So contact decreases if dirder_contact <= 0  <=>  <∇c, (v+theta)> >= 0.
+                    if project_contact_descent:
+                        gc = g_c.detach()
+                        u = (v_det + theta)  # u is the thing multiplied by dt in x update
+                        
+                        gc_flat = gc.view(B, -1)
+                        u_flat  = u.view(B, -1)
+                        inner = (gc_flat * u_flat).sum(dim=1, keepdim=True)  # <gc, u>
+                        gc2   = (gc_flat * gc_flat).sum(dim=1, keepdim=True).clamp_min(1e-8)
+                        
+                        # If inner < 0 -> dirder_contact = -inner > 0 (uphill), fix it by adding beta*gc to u
+                        # since <gc, u + beta*gc> = inner + beta*||gc||^2, choose beta = -inner/||gc||^2
+                        beta = (-inner / gc2).clamp_min(0.0)  # only when inner < 0
+                        theta.add_(beta.view(B, *([1]*(theta.ndim-1))) * gc)
+                        
+                        # re-apply trust region after projection
+                        th_norm = theta.view(B, -1).norm(dim=1).clamp_min(1e-8)
+                        th_scale = (max_th / th_norm).clamp(max=1.0).view(B, *([1]*(theta.ndim-1)))
+                        theta.mul_(th_scale)
+                        
+                    # Euler step (use detached v)
+                    x = x - dt * (v_det + theta)
+
+                # logging
+                if verbose:
+                    with torch.no_grad():
+                        # recompute directional derivatives using current u = v + theta
+                        u = (v_det + theta)
+                        gc = g_c.detach()
+                        gni = g_ni.detach()
+                        dir_c = (gc.view(B, -1) * (-u).view(B, -1)).sum(dim=1).mean().item()
+                        dir_ni = (gni.view(B, -1) * (-u).view(B, -1)).sum(dim=1).mean().item()
+                        
+                        step_v = (dt * v_det).norm().item()
+                        step_th = (dt * theta).norm().item()
+                        print(f"step={step_i:02d} dt={dt:.4f} ratio(theta/v)={step_th/(step_v+1e-12):.3f} "
+                              f"ni={ni_loss.item():.4e} c={contact_loss.item():.4e} "
+                              f"dirder_c={dir_c:.3e} dirder_ni={dir_ni:.3e} "
+                              f"contact_w_mean={contact_w.mean().item():.3e} sum={contact_w.sum().item():.3f}")
+                        
+                ret.pred_x_t.append(x.detach())
+                ret.pred_x_0.append(pred_x0.detach())
+
+            ret.samples = x.detach()
+            return ret
+
+        finally:
+            _restore_requires_grad(model, old_model_flags)
+            _restore_requires_grad(decoder, old_dec_flags)
+    
+    def sample_velocity_conditioned_oc(
+            self,
+            model,
+            noise,
+            decoder,
+            cond: dict | None = None,        # pos
+            neg_cond: dict | None = None,    # neg
+            steps: int = 50,
+            rescale_t: float = 1.0,
+            cfg_strength: float = 3.0,
+            # OC / physics
+            theta_lr: float = 0.3,
+            theta_decay: float = 0.9,
+            theta_max_ratio: float = 0.6,
+            lambda_inter: float = 100.0,
+            lambda_contact: float = 50.0,
+            guidance_start: int = 10,
+            verbose: bool = True,
+            **kwargs
+    ):
+        model.eval()
+        decoder.eval()
+        
+        cond = cond or {}
+        neg_cond = neg_cond or None
+        
+        # hand + touch should come from POSITIVE condition
+        x0_hand = cond.get("x0_hand", None)
+        touch   = cond.get("touch", None)
+        
+        # precompute hand sdf once
+        if x0_hand is not None:
+            with torch.no_grad():
+                sdf_hand = decoder(x0_hand)
+        else:
+            sdf_hand = None
+
+        t_seq = np.linspace(1.0, 0.0, steps + 1)
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = [(float(t_seq[i]), float(t_seq[i + 1])) for i in range(steps)]
+        
+        x = noise.detach().clone()
+        theta = torch.zeros_like(x)
+        
+        ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+        # freeze weights (still allows grad wrt inputs)
+        
+        for step_i, (t, t_prev) in enumerate(t_pairs):
+            dt = (t - t_prev)  # positive
+            guidance_on = (step_i >= guidance_start) and (sdf_hand is not None) and (touch is not None)
+
+            if guidance_on:
+                #print('guidance')
+                # --- enable grad wrt x only ---
+                x_var = x.detach().requires_grad_(True)
+                print("step: ",step_i)
+                #print("dt: ", dt)
+                # CFG velocity computed on x_var (so ∂v/∂x exists)
+                
+                v = self._inference_model(model, x_var, t, cond, neg_cond, cfg_strength, **kwargs)
+                #if (neg_cond is not None) and (cfg_strength is not None) and (cfg_strength != 0.0):
+                #    v_neg = self._inference_model(model, x_var, t, cond=neg_cond, **kwargs)
+                #    v = (1.0 + cfg_strength) * v_pos - cfg_strength * v_neg
+                #else:
+                #    v = v_pos
+
+                # pred_x0 must use v (NOT detached) for OC-style sensitivity
+                pred_x0, _ = self._v_to_xstart_eps(x_t=x_var, t=t, v=v)
+                
+                sdf_obj = decoder(pred_x0)
+                
+                # --- NI loss (same as your inference version) ---
+                # obj_inside  = torch.clamp(-sdf_obj,  0.0, 0.2)
+                # hand_inside = torch.clamp(-sdf_hand, 0.0, 0.2)
+                # inter = obj_inside * hand_inside
+                # pen_mask = (obj_inside > 0) & (hand_inside > 0)
+        
+                B = sdf_obj.shape[0]
+                # num = (inter * pen_mask).view(B, -1).sum(dim=1)
+                # den = pen_mask.view(B, -1).sum(dim=1).clamp_min(1)
+                # ni_loss = (num / den).mean()
+                #obj_inside  = torch.relu(-sdf_obj)    # [B,1,D,H,W]
+                #hand_inside = torch.relu(-sdf_hand)   # constant wrt x, but ok
+
+                #ni_loss = (obj_inside * hand_inside).mean()
+
+                tau = 0.2
+                hand_in = torch.sigmoid(-sdf_hand / tau)     # smooth hand interior weight
+                obj_pen = torch.relu(-sdf_obj)              # penetration depth
+                
+                B = sdf_obj.shape[0]
+                num = (obj_pen * hand_in).view(B, -1).sum(dim=1)
+                den = hand_in.view(B, -1).sum(dim=1).clamp_min(1.0)
+                ni_loss = (num / den).mean()
+                # --- contact loss ---
+                #contact_mask = touch[:, 0]
+                #contact_sdf  = contact_mask * sdf_obj.abs()
+                #num_c = contact_sdf.view(B, -1).sum(dim=1)
+                #den_c = contact_mask.view(B, -1).sum(dim=1).clamp_min(1)
+                #contact_loss = (num_c / den_c).mean()
+                outside = torch.sigmoid(sdf_hand / tau)      # ~1 outside, ~0 inside
+                contact_mask = touch[:, 0]                   # [B,D,H,W]
+                contact_w = contact_mask * outside[:,0]      # prevent rewarding interior contact
+                
+                contact_sdf = contact_w * sdf_obj.abs()
+                num_c = contact_sdf.view(B, -1).sum(dim=1)
+                den_c = contact_w.view(B, -1).sum(dim=1).clamp_min(1.0)
+                contact_loss = (num_c / den_c).mean()
+                E = lambda_inter * ni_loss + lambda_contact * contact_loss
+                
+                # gradient wrt x_var (includes ∂v/∂x via pred_x0(v(x_var)))
+                #g = torch.autograd.grad(E, x_var, retain_graph=False, create_graph=False)[0]
+                #g_ni = torch.autograd.grad(ni_loss, x_var, retain_graph=True)[0]
+                #g_c  = torch.autograd.grad(contact_loss, x_var, retain_graph=True)[0]
+                g_ni = torch.autograd.grad(ni_loss, x_var, retain_graph=True)[0]
+                g_c  = torch.autograd.grad(contact_loss, x_var, retain_graph=True)[0]
+                print("||g_ni||", g_ni.norm().item(), "||g_c||", g_c.norm().item())
+                def norm_per_sample(g):
+                    gn = g.view(B, -1).norm(dim=1).clamp_min(1e-8)
+                    return g / gn.view(B, *([1]*(g.ndim-1)))
+                g = lambda_inter * norm_per_sample(g_ni) + lambda_contact * norm_per_sample(g_c)
+
+                #print("||g_ni||", g_ni.norm().item(), "||g_c||", g_c.norm().item())
+                g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
+
+                
+                # normalize g per-sample (optional but good)
+                g_flat = g.view(B, -1)
+                #g_norm = g_flat.norm(dim=1).clamp_min(1e-8).view(B, *([1] * (g.ndim - 1)))
+                #g = g / g_norm
+                #g_norm = g_flat.norm(dim=1).view(B, *([1] * (g.ndim - 1))).clamp_min(1e-8)
+                #max_g = 5.0  # try 1, 5, 10
+                #scale = (max_g / g_norm).clamp(max=1.0)
+                target_g = 50.0  # try 10, 50, 100
+                g_norm = g_flat.norm(dim=1).view(B, *([1]*(g.ndim-1))).clamp_min(1e-8)
+                max_scale = 50
+                g = g * (target_g / g_norm).clamp(max=max_scale)     # <-- this *amplifies* when g is small
+                # update theta + state with no graph accumulation
+                with torch.no_grad():
+                    #theta.mul_(theta_decay).add_(-theta_lr * g)
+                    theta.mul_(theta_decay).add_(+theta_lr * g)
+                    # trust region on theta vs v (use v.detach() here safely)
+                    v_det = v.detach()
+                    v_norm  = v_det.view(B, -1).norm(dim=1).clamp_min(1e-8)
+                    th_norm = theta.view(B, -1).norm(dim=1).clamp_min(1e-8)
+                    max_th  = theta_max_ratio * v_norm
+                    scale = (max_th / th_norm).clamp(max=1.0).view(B, *([1] * (theta.ndim - 1)))
+                    theta.mul_(scale)
+                    step_v = (dt * v_det).norm().item()
+                    step_th = (dt * theta).norm().item()
+                    print("ratio theta/v =", step_th/(step_v+1e-12))
+                    print("ni_loss: ", ni_loss)
+                    print("contact_loss: ", contact_loss)
+                    step_dir = -(v_det + theta)  # because x <- x + dt*step_dir
+                    # flatten
+                    dd_c = (g_c * step_dir).view(B, -1).sum(dim=1).mean().item()
+                    dd_ni = (g_ni * step_dir).view(B, -1).sum(dim=1).mean().item()
+                    print("dirder contact (should be <0 to decrease):", dd_c,
+                          "dirder ni:", dd_ni)
+                    print("contact_w mean:", contact_w.mean().item(),
+                          "contact_w sum:", contact_w.sum().item(),
+                          "outside.mean", outside.mean().item(),
+                          "hand_in.mean", hand_in.mean().item())
+                    # Euler step (use v_det so we don't keep the graph)
+                    # step_dir = -(v_det + theta) should satisfy <g_c, step_dir> <= 0
+                    gc = g_c.view(B, -1)
+                    step = (v_det + theta).view(B, -1)   # note: step_dir = -step
+                    
+                    dot = (gc * (-step)).sum(dim=1, keepdim=True)  # <g_c, step_dir>
+                    # if dot > 0 => uphill for contact
+                    gc2 = (gc * gc).sum(dim=1, keepdim=True).clamp_min(1e-8)
+                    
+                    # subtract from theta the component that makes it uphill
+                    # we adjust "step" by changing theta only
+                    # want dot_new = dot - alpha*||gc||^2 <= 0  => alpha >= dot/gc2
+                    alpha = (dot / gc2).clamp_min(0.0)   # only if uphill
+                    theta = theta - alpha.view(B, *([1]*(theta.ndim-1))) * g_c
+                    
+                    x = x - dt * (v_det + theta)
+
+            else:
+                # --- guidance OFF: no grads anywhere ---
+                with torch.no_grad():
+                    v = self._inference_model(model, x, t, cond, neg_cond, cfg_strength, **kwargs)
+                    #if (neg_cond is not None) and (cfg_strength is not None) and (cfg_strength != 0.0):
+                    #    v_neg = self._inference_model(model, x, t, cond=neg_cond, **kwargs)
+                    #    v = (1.0 + cfg_strength) * v_pos - cfg_strength * v_neg
+                    #else:
+                    #    v = v_pos
+
+                    theta.mul_(theta_decay)
+                    x = x - dt * (v + theta)
+
+            ret.pred_x_t.append(x.detach())
+
+            if verbose and (step_i % 5 == 0):
+                th = theta.abs().mean().item()
+                vv = v.abs().mean().item()
+                print(f"[{step_i:02d}] t={t:.3f} |theta|mean={th:.2e} |v|mean={vv:.2e} ratio={th/(vv+1e-12):.2e}")
+
+
+        ret.samples = x.detach()
+        return ret
+
     
     def sample_optimization(
         self,
@@ -772,6 +1487,7 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSa
         noise,
         decoder,
         cond,
+        neg_cond=None,
         steps: int = 50,
         rescale_t: float = 1.0,
         cfg_strength: float = 3.0,
@@ -781,7 +1497,7 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSa
     ):
         """
         Generate samples from the model using Euler method.
-        
+
         Args:
             model: The model to sample from.
             noise: The initial noise tensor.
@@ -800,8 +1516,14 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSa
             - 'pred_x_t': a list of prediction of x_t.
             - 'pred_x_0': a list of prediction of x_0.
         """
-        print('inside')
-        return super().sample_velocity_conditioned(model, noise, decoder, cond, steps, rescale_t, cfg_strength=cfg_strength, cfg_interval=cfg_interval, **kwargs)
+        # NOTE: everything after `cond` is passed by keyword -- the base signature has
+        # neg_cond as its 5th parameter, so positional steps/rescale_t would land in the
+        # wrong slots (that bug shipped once: steps=25 arrived as neg_cond).
+        return super().sample_velocity_conditioned(
+            model, noise, decoder, cond,
+            neg_cond=neg_cond, steps=steps, rescale_t=rescale_t,
+            cfg_strength=cfg_strength, cfg_interval=cfg_interval,
+            verbose=verbose, **kwargs)
 
 
 # ==============================================================================

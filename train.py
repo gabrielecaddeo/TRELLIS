@@ -4,7 +4,7 @@ import json
 import glob
 import argparse
 from easydict import EasyDict as edict
-
+import traceback
 import torch
 import torch.multiprocessing as mp
 import numpy as np
@@ -16,6 +16,15 @@ seed = 1337
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
 random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 torch.use_deterministic_algorithms(True, warn_only=True)
+# PyTorch has defaulted allow_tf32=False for matmuls since 1.12, so every fp32 matmul here was
+# taking the non-tensor-core path -- ~67 TFLOPS instead of ~495 dense TF32 on an H200.
+# Measured on the real denoiser (tools/bench_tf32.py): 18.30 -> 13.06 s/step, a 1.40x speedup.
+# TF32 keeps the fp32 exponent range and accumulates in fp32; only the matmul input mantissa
+# drops 23 -> 10 bits. Measured output perturbation on this model: 1.6e-3 relative, i.e. 0.16%
+# of signal against a training mse of ~0.17. This is a different risk class from fp16, which
+# is what produced the NaN in outputs/flow_conditioned_distilled_all/nan_debug_autograd.log.
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 def find_ckpt(cfg):
     # Load checkpoint
@@ -71,7 +80,7 @@ def main(local_rank, cfg):
 
     # Load data
     dataset = getattr(datasets, cfg.dataset.name)(cfg.data_dir, **cfg.dataset.args)
-
+    dataset_test = getattr(datasets, cfg.dataset.name)(cfg.data_dir_test, **cfg.dataset.args)
     # Build model
     model_dict = {
         name: getattr(models, model.name)(**model.args).cuda()
@@ -86,7 +95,7 @@ def main(local_rank, cfg):
         # Load pretrained weights
         
         missing, unexpected = model_dict['encoder'].load_state_dict(load_file("/home/user/.cache/huggingface/hub/models--microsoft--TRELLIS-image-large/snapshots/25e0d31ffbebe4b5a97464dd851910efc3002d96/ckpts/ss_enc_conv3d_16l8_fp16.safetensors"), strict=False)
-        print("Missing keys:", missing)
+        #print("Missing keys:", missing)
         print("Unexpected keys:", unexpected)
 
         # Freeze all parameters
@@ -100,7 +109,7 @@ def main(local_rank, cfg):
         # Load pretrained weights
         
         missing, unexpected = model_dict['denoiser'].load_state_dict(torch.load(cfg.ckpt_flow_path), strict=False)
-        print("Missing keys:", missing)
+        #print("Missing keys:", missing)
         print("Unexpected keys:", unexpected)
         if cfg.initialize_layers:
             print("Initializing input layer for hand encoding...")
@@ -130,7 +139,7 @@ def main(local_rank, cfg):
                 print(model_summary, file=fp)
 
     # Build trainer
-    trainer = getattr(trainers, cfg.trainer.name)(model_dict, dataset, **cfg.trainer.args, output_dir=cfg.output_dir, load_dir=cfg.load_dir, step=cfg.load_ckpt)
+    trainer = getattr(trainers, cfg.trainer.name)(model_dict, dataset, dataset_test, **cfg.trainer.args, output_dir=cfg.output_dir, load_dir=cfg.load_dir, step=cfg.load_ckpt)
 
     # Train
     if not cfg.tryrun:
@@ -146,10 +155,11 @@ if __name__ == '__main__':
     ## config
     parser.add_argument('--config', type=str, default='/home/user/TRELLIS/configs/generation/ss_flow_img_dit_L_16l8_fp16_sdf_conditioned.json', required=False, help='Experint config file')
     ## io and resume
-    parser.add_argument('--output_dir', default='/home/user/TRELLIS/outputs/flow_conditioned_trial_penetration_loss', type=str, required=False, help='Output directory')
+    parser.add_argument('--output_dir', default='/home/TRELLIS/outputs/flow_conditioned_trial_penetration_loss', type=str, required=False, help='Output directory')
     parser.add_argument('--load_dir', type=str, default='', help='Load directory, default to output_dir')
     parser.add_argument('--ckpt', type=str, default='latest', help='Checkpoint step to resume training, default to latest')
-    parser.add_argument('--data_dir', type=str, default='/home/user/TRELLIS/datasets/Hands', help='Data directory')
+    parser.add_argument('--data_dir', type=str, default='/home/user/TRELLIS/datasets/Leap_Hand', help='Data directory')
+    parser.add_argument('--data_dir_test', type=str, default='/projects/gcaddeo/train_flow/TRELLIS/datasets/Leap_Hand', help='Data directory')
     parser.add_argument('--auto_retry', type=int, default=3, help='Number of retries on error')
     ## debug
     parser.add_argument('--tryrun', action='store_true', help='Try run without training')
@@ -166,7 +176,7 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt_flow_path', type=str, default='/home/user/TRELLIS/outputs/flow_conditioned_trial_no_losses/ckpts/denoiser_ema0.9999_step0012000.pt', help='Path to flow ckpt to load weights from')
     opt = parser.parse_args()
     # Hardcode for debug!!!
-    opt.load_flow_weights = True
+    #opt.load_flow_weights = True
     opt.load_dir = opt.load_dir if opt.load_dir != '' else opt.output_dir
     opt.num_gpus = torch.cuda.device_count() if opt.num_gpus == -1 else opt.num_gpus
     ## Load config
@@ -205,6 +215,6 @@ if __name__ == '__main__':
                     main(0, cfg)
                 break
             except Exception as e:
-                print(f'Error: {e}')
-                print(f'Retrying ({rty + 1}/{cfg.auto_retry})...')
-            
+                print("Error occurred. Full traceback:")
+                traceback.print_exc()  # <-- shows file + line + call stack
+                print(f'Retrying ({rty + 1}/{cfg.auto_retry})...')            

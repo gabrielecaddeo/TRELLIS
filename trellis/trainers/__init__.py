@@ -19,6 +19,7 @@ __attributes = {
     'TextConditionedFlowMatchingCFGTrainer': 'flow_matching.flow_matching',
     'ImageConditionedFlowMatchingCFGTrainer': 'flow_matching.flow_matching',
     'ImageConditionedFlowMatchingCFGTrainerConditioned': 'flow_matching.flow_matching',
+    'ImageConditionedFlowMatchingCFGDistillationTrainerConditioned': 'flow_matching.distillation',
     
     'SparseFlowMatchingTrainer': 'flow_matching.sparse_flow_matching',
     'SparseFlowMatchingCFGTrainer': 'flow_matching.sparse_flow_matching',
@@ -61,6 +62,7 @@ if __name__ == '__main__':
         TextConditionedFlowMatchingCFGTrainer,
         ImageConditionedFlowMatchingCFGTrainer,ImageConditionedFlowMatchingCFGTrainerConditioned,
     )
+    from .flow_matching.distillation import ImageConditionedFlowMatchingCFGDistillationTrainerConditioned
     
     from .flow_matching.sparse_flow_matching import (
         SparseFlowMatchingTrainer,

@@ -293,9 +293,32 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         self.lambda_ni_max   = kwargs.get('lambda_non_interpenetration_max', None)
         self.warmup_steps   = kwargs.get('lambda_non_interpenetration_warmup', None)
         self.lambda_contact   = kwargs.get('lambda_contact', None)
-        self.use_touch    = kwargs.get('use_touch', True) 
+        self.use_touch    = kwargs.get('use_touch', True)
         self.use_encoding_hand    = kwargs.get('use_encoding_hand', True)
+        # Physics-loss shaping. relu(-sdf_obj) has zero subgradient unless the predicted
+        # object genuinely overlaps the hand, so NI only ever fires after the fact; the
+        # margin (in unit-cube SDF units, 1 voxel = 1/64) gives it gradient just before
+        # contact. hand_mask excludes the same shell so NI does not fight the contact term.
+        self.ni_margin = kwargs.get('ni_margin', 1.0 / 64.0)
+        self.physics_time_power = kwargs.get('physics_time_power', 2.0)
+        # 'mask': |sdf_obj| on the ~75 binary contact voxels (the original formulation).
+        # 'soft': exp(-dist/sigma) over the dense touch[:, 1] distance field, which gives
+        #         far more of the grid a gradient. Pick from probe A's contact/gt_floor.
+        self.contact_mode = kwargs.get('contact_mode', 'mask')
+        self.contact_sigma = kwargs.get('contact_sigma', 2.0 / 64.0)
+        # Both physics terms are absolute penalties, but neither is zero for a *perfect*
+        # latent: pushed through the frozen ss_dec, the ground-truth x_0 scores contact
+        # ~0.0113 (0.72 voxels -- sub-voxel, i.e. discretisation) and NI ~1.1e-4, the latter
+        # 8x MORE than the current model. Measured by probe A. So minimising either toward
+        # zero eventually moves the prediction away from the truth rather than toward it.
+        # With these on, each term is measured relative to what x_0 itself scores through the
+        # same decoder, so the artifact cancels and only the real headroom is penalised.
+        # Costs one extra no-grad ss_dec pass per step. Off by default: turn on in the stage-2
+        # config once probe A has been re-run against the *margined* NI formulation.
+        self.contact_relative = kwargs.get('contact_relative', False)
+        self.ni_relative = kwargs.get('ni_relative', False)
         self.snapshot_indices = None
+        self.snapshot_indices_test = None
         print(self.step)
         self._loading_ss_dec()
 
@@ -393,6 +416,138 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
             raise ValueError(f"Unknown t_schedule: {self.t_schedule['name']}")
         return t
 
+    def _v_to_xstart_eps(self, x_t, t, v):
+        assert x_t.shape == v.shape
+        # make t broadcast over [B, C, D, H, W]
+        if t.ndim == 1:
+            t = t.view(-1, *([1] * (x_t.ndim - 1)))
+        elif t.ndim == 2 and t.shape[1] == 1:
+            t = t.view(-1, *([1] * (x_t.ndim - 1)))
+        else:
+            # if t is already broadcastable, leave it
+            pass
+
+        eps = (1 - t) * v + x_t
+        x_0 = (1 - self.sigma_min) * x_t - (self.sigma_min + (1 - self.sigma_min) * t) * v
+        return x_0, eps
+
+
+
+    # def training_losses(
+    #         self,
+    #         x_0: torch.Tensor,
+    #         x0_hand: torch.Tensor,
+    #         cond=None,
+    #         mask_hand=None,
+    #         mask_obj=None,
+    #         cond_mask=None,
+    #         touch=None,
+    #         **kwargs
+    # ):
+    #     noise = torch.randn_like(x_0)
+    #     t = self.sample_t(x_0.shape[0]).to(x_0.device).float()   # [B] in [0,1]
+    #     x_t = self.diffuse(x_0, t, noise=noise)
+
+    #     # conditions dict (CFG dropping happens inside)
+    #     cond_dict = self.get_cond(cond, mask_hand, mask_obj, cond_mask, x0_hand, touch, **kwargs)
+        
+    #     pred = self.training_models["denoiser"](x_t, t * 1000, cond_dict, **kwargs)
+    #     target = self.get_v(x_0, noise, t)
+
+    #     terms = edict()
+    #     mse_loss_term = F.mse_loss(pred, target)
+    #     terms["mse"] = mse_loss_term
+    #     terms["loss"] = mse_loss_term
+
+    #     # -----------------------------
+    #     # Physics/contact losses
+    #     # -----------------------------
+    #     if self.use_encoding_hand:
+    #         # schedule: only apply physics strongly for late diffusion times (small t)
+    #         # t=1 is very noisy, t=0 is clean
+    #         t0 = getattr(self, "physics_t0", 0.35)   # you can set self.physics_t0
+    #         p  = getattr(self, "physics_tp", 2.0)    # power
+    #         s  = getattr(self, "physics_ts", 0.08)
+    #         w_t = torch.sigmoid((t0 - t) / max(s, 1e-6)) ** p          # [B] in (0,1)
+    #         w_t = w_t.detach() 
+    #         # if you want an even later start, reduce t0 or increase p
+            
+    #         # predicted x0 from v-prediction
+    #         x0_pred, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=pred)
+
+    #         # decode object SDF (grad flows to x0_pred; decoder weights can be frozen elsewhere)
+    #         sdf_obj = self.ss_dec(x0_pred)  # [B,1,64,64,64]
+
+    #         # hand sdf is constant wrt denoiser
+    #         with torch.no_grad():
+    #             sdf_hand = self.ss_dec(x0_hand)  # [B,1,64,64,64]
+                
+    #         # gates / smooth params (in SDF units)
+    #         tau = getattr(self, "physics_tau", 0.05)
+    #         band = getattr(self, "contact_band", 0.06)
+    #         abs_eps = 1e-6
+
+    #         B = sdf_obj.shape[0]
+
+    #         # ---------- NI: average penetration depth over overlap ----------
+    #         # object-inside soft mask (detach for stability of weighting)
+    #         hand_in = torch.sigmoid(-sdf_hand / tau)              # ~1 inside hand
+    #         obj_pen = F.relu(-sdf_obj)                            # penetration depth
+
+    #         ni_num = (obj_pen * hand_in).view(B, -1).sum(dim=1)
+    #         ni_den = hand_in.view(B, -1).sum(dim=1).clamp_min(1.0)
+    #         ni_per = ni_num / ni_den                              # [B] avg depth
+    #         ni_loss = (w_t * ni_per).mean()
+            
+    #         lambda_ni = float(self.get_lambda_ni())
+    #         terms["ni_loss_raw"] = ni_per.mean()
+    #         terms["ni_loss"] = lambda_ni * ni_loss
+    #         terms["loss"] = terms["loss"] + terms["ni_loss"]
+    
+    #         # ---------- Contact using distance-to-contact field ----------
+    #         if self.use_touch and (touch is not None):
+    #             # Expect touch[:,0]=mask (optional), touch[:,1]=dist_to_contact (EDT)
+    #             # Shapes: [B,2,64,64,64]
+    #             dist = touch[:, 1].to(sdf_obj.dtype)  # [B,D,H,W], distance in same units as sdf
+    #             # gate outside-hand to avoid rewarding "contact" inside hand volume
+    #             outside = torch.sigmoid(sdf_hand / tau)[:, 0]  # [B,D,H,W] ~1 outside
+                
+    #             # weight neighborhood around contact set using dist
+    #             # sigma controls how wide contact influence is (in SDF units)
+    #             sigma = getattr(self, "contact_sigma", 2.0 * (2.0 / 64.0))  # ~2 voxels if unit2 SDF
+    #             w = torch.exp(-dist / max(sigma, 1e-6)) * outside           # [B,D,H,W]
+                
+    #             # smooth |sdf| and band it
+    #             abs_sdf = torch.sqrt(sdf_obj[:, 0] * sdf_obj[:, 0] + abs_eps)
+    #             abs_sdf = torch.clamp(abs_sdf, 0.0, band)
+                
+    #             # hinge: only penalize if surface is farther than the distance-to-contact allows
+    #             # (pulls surface toward contact without forcing global |sdf|=dist)
+    #             c_num = (w * abs_sdf).view(B, -1).sum(dim=1)
+    #             c_den = w.view(B, -1).sum(dim=1).clamp_min(1.0)
+    #             c_per = c_num / c_den
+    #             contact_loss = (w_t * c_per).mean()
+
+                
+    #             terms["contact_raw"] = c_per.mean()
+    #             terms["contact_loss"] = contact_loss * self.lambda_contact
+    #             terms["loss"] = terms["loss"] + contact_loss * self.lambda_contact
+
+    #     # -----------------------------
+    #     # time-bin logging (unchanged)
+    #     # -----------------------------
+    #     mse_per_instance = np.array([
+    #         F.mse_loss(pred[i], target[i]).item()
+    #         for i in range(x_0.shape[0])
+    #     ])
+    #     time_bin = np.digitize(t.detach().cpu().numpy(), np.linspace(0, 1, 11)) - 1
+    #     for i in range(10):
+    #         if (time_bin == i).sum() != 0:
+    #             terms[f"bin_{i}"] = {"mse": mse_per_instance[time_bin == i].mean()}
+                
+    #     return terms, {}
+    
+    
     # def training_losses(
     #         self,
     #         x_0: torch.Tensor,
@@ -424,27 +579,33 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
     #     terms["loss"] = mse_loss_term
 
     #     if self.use_encoding_hand:
-    #         x0_pred = (1 - self.sigma_min) * noise - pred
+    #         #x0_pred = (1 - self.sigma_min) * noise - pred
+    #         x0_pred, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=pred)
     #         sdf_obj  = self.ss_dec(x0_pred)              # [B, 1, 64, 64, 64]
     #         with torch.no_grad():
     #             # Add non-interpenetration
     #             sdf_hand = self.ss_dec(x0_hand)          # [B, 1, 64, 64, 64]
-    #         max_pen = 0.1  # clamp SDF to avoid very deep, noisy gradients
-    #         obj_inside  = max_pen * torch.tanh(torch.nn.relu(-sdf_obj)/max_pen)
-    #         hand_inside = max_pen * torch.tanh(torch.nn.relu(-sdf_hand)/max_pen)
-
+    #         #max_pen = 0.5  # clamp SDF to avoid very deep, noisy gradients
+    #         #obj_inside  = max_pen * torch.tanh(F.relu(-sdf_obj)/max_pen)
+    #         #hand_inside = max_pen * torch.tanh(F.relu(-sdf_hand)/max_pen)
+    #         obj_inside  = F.relu(-sdf_obj)
+    #         hand_inside = F.relu(-sdf_hand)
+            
     #         interpenetration = obj_inside * hand_inside  # [B, 1, D, H, W]
 
     #         # mask of voxels that actually penetrate
-    #         pen_mask = (obj_inside > 0) & (hand_inside > 0)  # same shape
+    #         #pen_mask = (obj_inside > 0) & (hand_inside > 0)  # same shape
 
-    #         B = interpenetration.shape[0]
+    #         #B = interpenetration.shape[0]
     #         # sum over 3D dims
-    #         num  = (interpenetration * pen_mask).view(B, -1).sum(dim=1)      # [B]
-    #         den  = pen_mask.view(B, -1).sum(dim=1).clamp_min(1)             # [B], #penetrating voxels
-    #         ni_per_sample = num / den                                       # [B]
-    #         ni_loss = ni_per_sample.mean()
+    #         #num  = (interpenetration * pen_mask).view(B, -1).sum(dim=1)      # [B]
+    #         #den  = pen_mask.view(B, -1).sum(dim=1).clamp_min(1)             # [B], #penetrating voxels
+    #         #ni_per_sample = num / den                                       # [B]
+    #         #ni_loss = ni_per_sample.mean()
 
+    #         ni_per_sample = interpenetration.view(interpenetration.shape[0], -1).sum(dim=1)
+    #         ni_loss = ni_per_sample.mean()
+            
     #         lambda_ni = self.get_lambda_ni()          # scalar (float or 0-d tensor)
     #         terms["ni_loss_raw"] = ni_loss
     #         terms["ni_loss"] = lambda_ni * ni_loss           # unweighted
@@ -479,6 +640,8 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
     #             terms[f"bin_{i}"] = {"mse": mse_per_instance[time_bin == i].mean()}
 
     #     return terms, {}
+
+
     def training_losses(
         self,
         x_0: torch.Tensor,
@@ -498,6 +661,15 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         # Get (possibly CFG-dropped) conditions
         cond_dict = self.get_cond(cond, mask_hand, mask_obj, cond_mask, x0_hand, touch, **kwargs)
 
+        B = x_0.shape[0]
+        # 1 where the CFG mixin kept the hand conditioning, 0 where it zeroed it. The
+        # physics terms must be silent on dropped samples: penalising a sample for
+        # interpenetrating a hand the network cannot see is an impossible objective, and
+        # the bias would land on the unconditional branch that CFG extrapolates away from.
+        # Read off the returned dict rather than the RNG, so it stays correct regardless
+        # of how ClassifierFreeGuidanceMixin draws its mask.
+        kept = (cond_dict['x0_hand'].reshape(B, -1).abs().sum(dim=1) > 0).float()
+
         # Denoiser forward
         pred = self.training_models["denoiser"](x_t, t * 1000, cond_dict, **kwargs)
 
@@ -510,66 +682,92 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         terms["loss"] = mse_loss_term
 
         # ---------- Physics weighting by time ----------
-        # Smoothly downweight physics at high t (noisy)
-        # p=2 is a solid default; increase to focus even more on small t.
-        p = getattr(self, "physics_time_power", 2.0)
-        w = (1.0 - t).clamp(0.0, 1.0).pow(p)                            # [B]
-        w_sum = w.sum().clamp_min(1e-8)
+        # Smoothly downweight physics at high t (noisy); p=2 is a solid default.
+        # NOTE: this is a plain .mean(), not a `/ w.sum()` weighted average. Normalising
+        # by w.sum() made the weighting scale-invariant, so a batch where every t ~= 0.95
+        # still produced a full-magnitude physics loss -- it only reweighted *within* a
+        # batch, which is not what the downweighting is for.
+        p = self.physics_time_power
+        w = (1.0 - t).clamp(0.0, 1.0).pow(p) * kept                     # [B]
 
-        if self.use_encoding_hand:
-            # x0 prediction from v-pred
-            x0_pred = (1.0 - self.sigma_min) * noise - pred
+        lambda_ni = self.get_lambda_ni() if self.lambda_ni_max is not None else 0.0
+        lambda_contact = self.lambda_contact or 0.0
+        # Both lambdas zero (stage 1) => skip the decoder passes entirely.
+        physics_on = self.use_encoding_hand and (lambda_ni > 0 or lambda_contact > 0)
+
+        if physics_on:
+            # x0 prediction from v-pred. The previous form,
+            #     x0_pred = (1 - sigma_min) * noise - pred,
+            # is not an estimator of x_0 at all: since v_target = (1-sigma)*noise - x_0 it
+            # equals x_0 + (v_target - pred), i.e. it carries the full v-prediction error
+            # at every t and uses the ground-truth noise, which inference does not have.
+            x0_pred, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=pred)
 
             # Decode to SDF (do physics in fp32 for stability)
             sdf_obj = self.ss_dec(x0_pred).float()                       # [B, 1, 64, 64, 64]
             with torch.no_grad():
                 sdf_hand = self.ss_dec(x0_hand).float()                  # [B, 1, 64, 64, 64]
+                # What the ground-truth latent itself scores through this same decoder.
+                sdf_gt = (self.ss_dec(x_0).float()
+                          if (self.contact_relative or self.ni_relative) else None)
 
-            # Smooth saturation (keeps gradients for deep penetration)
+            # Smooth saturation (keeps gradients for deep penetration). The margin makes
+            # the term fire just *before* overlap instead of only after it.
             max_pen = 0.1
-            obj_inside  = max_pen * torch.tanh(F.relu(-sdf_obj) / max_pen)
-            hand_inside = max_pen * torch.tanh(F.relu(-sdf_hand) / max_pen)
+            margin = self.ni_margin
+            obj_inside = max_pen * torch.tanh(F.relu(margin - sdf_obj) / max_pen)
 
-            # Hand region mask (fixed / no-grad)
-            # You can swap this for a surface band if you prefer:
-            # band = (sdf_hand.abs() < eps).float()
-            hand_mask = (hand_inside > 0).float()                        # [B,1,D,H,W]
-
-            B = sdf_obj.shape[0]
+            # Hand region mask (fixed / no-grad). Strictly interior, so the contact shell
+            # -- where the contact term wants |sdf_obj| = 0 -- is excluded and the two
+            # terms do not cancel each other.
+            hand_mask = (sdf_hand < -margin).float()                     # [B,1,D,H,W]
 
             # Interpenetration: object inside where hand exists
-            # (no discontinuous pen_mask; this is smoother)
             num = (obj_inside * hand_mask).view(B, -1).sum(dim=1)        # [B]
             den = hand_mask.view(B, -1).sum(dim=1).clamp_min(1.0)        # [B]
             ni_per_sample = num / den                                    # [B]
 
-            # Time-weighted batch mean
-            ni_loss_raw = (w * ni_per_sample).sum() / w_sum
+            if self.ni_relative:
+                gt_inside = max_pen * torch.tanh(F.relu(margin - sdf_gt) / max_pen)
+                ni_floor = (gt_inside * hand_mask).view(B, -1).sum(dim=1) / den
+                terms["ni_floor"] = ni_floor.mean()
+                ni_per_sample = F.relu(ni_per_sample - ni_floor)
 
-            lambda_ni = self.get_lambda_ni()
+            # Time-weighted batch mean
+            ni_loss_raw = (w * ni_per_sample).mean()
+
             terms["ni_loss_raw"] = ni_loss_raw
             terms["ni_loss"] = lambda_ni * ni_loss_raw
             terms["loss"] = terms["loss"] + lambda_ni * ni_loss_raw
 
-            if self.use_touch and (touch is not None):
-                # touch: [B, 2, 64, 64, 64]
-                contact_mask = touch[:, 0].float()                       # [B, 64, 64, 64]
+            if self.use_touch and (touch is not None) and lambda_contact > 0:
+                # touch: [B, 2, 64, 64, 64]; ch0 = binary contact grid, ch1 = dist_to_contact
+                if self.contact_mode == 'soft':
+                    # Dense soft neighbourhood: ~the whole grid gets some gradient rather
+                    # than the ~75 voxels (0.03% of 64^3) the binary mask reaches.
+                    contact_w = torch.exp(-touch[:, 1].float() / max(self.contact_sigma, 1e-6))
+                else:
+                    contact_w = touch[:, 0].float()                      # [B, 64, 64, 64]
 
                 # sdf_obj: [B,1,64,64,64] -> [B,64,64,64]
                 sdf_abs = sdf_obj.abs().squeeze(1)
 
-                contact_sdf = contact_mask * sdf_abs                      # [B, 64, 64, 64]
-
-                num = contact_sdf.view(B, -1).sum(dim=1)                  # [B]
-                den = contact_mask.view(B, -1).sum(dim=1).clamp_min(1.0)  # [B]
+                num = (contact_w * sdf_abs).view(B, -1).sum(dim=1)        # [B]
+                den = contact_w.view(B, -1).sum(dim=1).clamp_min(1.0)     # [B]
                 contact_per_sample = num / den                            # [B]
 
+                if self.contact_relative:
+                    contact_floor = ((contact_w * sdf_gt.abs().squeeze(1))
+                                     .view(B, -1).sum(dim=1) / den)
+                    terms["contact_floor"] = contact_floor.mean()
+                    contact_per_sample = F.relu(contact_per_sample - contact_floor)
+
                 # Time-weighted batch mean
-                contact_raw = (w * contact_per_sample).sum() / w_sum
+                contact_raw = (w * contact_per_sample).mean()
 
                 terms["contact_raw"] = contact_raw
-                terms["contact_loss"] = contact_raw * self.lambda_contact
-                terms["loss"] = terms["loss"] + contact_raw * self.lambda_contact
+                terms["contact_loss"] = contact_raw * lambda_contact
+                terms["loss"] = terms["loss"] + contact_raw * lambda_contact
 
         # time-bin logging (unchanged)
         mse_per_instance = np.array([
@@ -591,16 +789,19 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         batch_size: int,
         verbose: bool = False,
     ) -> Dict:
-        num_samples = 8
-        if self.snapshot_indices is None:
-            g = torch.Generator().manual_seed(1234)  # or choose your favourite seed
-            self.snapshot_indices = torch.randperm(len(self.dataset), generator=g)[:num_samples]
+        num_samples = 16
+        snap_ds = self.get_snapshot_dataset()
+        if getattr(self, "snapshot_indices_test", None) is None:
+            g = torch.Generator().manual_seed(1234)
+            self.snapshot_indices_test = torch.randperm(len(snap_ds), generator=g)[:num_samples]
 
-        indices = self.snapshot_indices[:num_samples]
+        indices = self.snapshot_indices_test[:num_samples]
+        
 
         # make a copy of the dataset and put it in inference mode
-        base_dataset = copy.deepcopy(self.dataset)
-        base_dataset.inference = True
+        base_dataset = copy.deepcopy(snap_ds)
+        if hasattr(base_dataset, "inference"):
+            base_dataset.inference = True
 
         snapshot_dataset = Subset(base_dataset, indices)
 
@@ -609,7 +810,7 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
             batch_size=batch_size,
             shuffle=False,
             num_workers=0,
-            collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
+            collate_fn=snap_ds.collate_fn if hasattr(snap_ds, 'collate_fn') else None,
         )
 
 
@@ -617,6 +818,7 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
         sampler = self.get_sampler()
         sample_gt = []
         sample = []
+        sample_optimized = []
         cond_vis = []
         sample_hand = []
         loader_iter = iter(dataloader)
@@ -638,15 +840,29 @@ class FlowMatchingTrainerConditioned(BasicTrainer):
                 **args,
                 steps=50, cfg_strength=3.0, verbose=verbose,
             )
-            sample.append(res.samples)
+            # with torch.enable_grad():
+            #     res2 = sampler.sample_velocity_conditioned_oc2(
+            #         self.models["denoiser"],
+            #         noise=noise,
+            #         decoder=self.ss_dec,
+            #         cond=args["cond"],                 # <-- pos dict
+            #         neg_cond=args["neg_cond"],         # <-- neg dict
+            #         steps=50,
+            #         cfg_strength=3.0,
+            #         #verbose=verbose,
+            #     )
 
+            sample.append(res.samples)
+            #sample_optimized.append(res2.samples)
         sample_gt = torch.cat(sample_gt, dim=0)
         sample = torch.cat(sample, dim=0)
         sample_hand = torch.cat(sample_hand, dim=0)
+        #sample_optimized = torch.cat(sample_optimized, dim=0)
         sample_dict = {
             'sample_gt': {'value': sample_gt, 'type': 'sample'},
             'sample': {'value': sample, 'type': 'sample'},
             'sample_hand': {'value': sample_hand, 'type': 'sample'},
+            #'sample_optimized': {'value': sample_optimized, 'type': 'sample'},
         }
         sample_dict.update(dict_reduce(cond_vis, None, {
             'value': lambda x: torch.cat(x, dim=0),

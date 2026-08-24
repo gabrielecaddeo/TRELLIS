@@ -1,3 +1,4 @@
+import os
 from typing import *
 import torch
 import torch.nn.functional as F
@@ -6,6 +7,21 @@ import numpy as np
 from PIL import Image
 
 from ....utils import dist_utils
+
+
+def _load_dinov2(model_name: str):
+    """torch.hub.load('facebookresearch/dinov2', ...) resolves the repo's HEAD ref via
+    a GitHub API call on every invocation, even when the repo and weights are already
+    fully cached locally -- so a transient network hiccup on a compute node can crash
+    an otherwise-offline job (seen on job 457, same node that had just succeeded on
+    jobs 452/456). If the hub cache already holds the full repo, load from it directly
+    (source='local'), which touches no network at all; fall back to the normal path
+    otherwise.
+    """
+    cache_dir = os.path.join(torch.hub.get_dir(), "facebookresearch_dinov2_main")
+    if os.path.isdir(cache_dir):
+        return torch.hub.load(cache_dir, model_name, source="local", pretrained=True)
+    return torch.hub.load("facebookresearch/dinov2", model_name, pretrained=True)
 
 
 class ImageConditionedMixin:
@@ -28,14 +44,14 @@ class ImageConditionedMixin:
         if hasattr(super(ImageConditionedMixin, ImageConditionedMixin), 'prepare_for_training'):
             super(ImageConditionedMixin, ImageConditionedMixin).prepare_for_training(**kwargs)
         # download the model
-        torch.hub.load('facebookresearch/dinov2', image_cond_model, pretrained=True)
+        _load_dinov2(image_cond_model)
         
     def _init_image_cond_model(self):
         """
         Initialize the image conditioning model.
         """
         with dist_utils.local_master_first():
-            dinov2_model = torch.hub.load('facebookresearch/dinov2', self.image_cond_model_name, pretrained=True)
+            dinov2_model = _load_dinov2(self.image_cond_model_name)
         dinov2_model.eval().cuda()
         transform = transforms.Compose([
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -146,14 +162,14 @@ class ImageConditionedMixinConditioned:
         if hasattr(super(ImageConditionedMixinConditioned, ImageConditionedMixinConditioned), 'prepare_for_training'):
             super(ImageConditionedMixinConditioned, ImageConditionedMixinConditioned).prepare_for_training(**kwargs)
         # download the model
-        torch.hub.load('facebookresearch/dinov2', image_cond_model, pretrained=True)
+        _load_dinov2(image_cond_model)
         
     def _init_image_cond_model(self):
         """
         Initialize the image conditioning model.
         """
         with dist_utils.local_master_first():
-            dinov2_model = torch.hub.load('facebookresearch/dinov2', self.image_cond_model_name, pretrained=True)
+            dinov2_model = _load_dinov2(self.image_cond_model_name)
         dinov2_model.eval().cuda()
         transform = transforms.Compose([
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -191,10 +207,16 @@ class ImageConditionedMixinConditioned:
         Get the conditioning data.
         """
         # Encode / patch everything
-        cond_enc       = self.encode_image(cond)        # [B, ..., C]
         cond_mask_enc  = self.encode_image(cond_mask)   # [B, ..., C]
         mask_hand_enc  = self.mask_patcher(mask_hand)   # [B, 37, 37]
         mask_obj_enc   = self.mask_patcher(mask_obj)    # [B, 37, 37]
+        # No transformer block reads context['cond'] -- the object-masked `cond_mask` is
+        # the image path that actually reaches the network (via cross_attn, weighted by
+        # mask_obj). Running a second full ViT-L/14 forward at 518^2 every step for a
+        # tensor nothing consumes is pure cost, so keep the key (the CFG mixin takes the
+        # batch size from the first entry, and the model does a .type() on it) but not
+        # the encode. Inference still encodes it -- see get_inference_cond.
+        cond_enc       = torch.zeros_like(cond_mask_enc)
 
         # Pack all positive conditions into a single dict
         cond_dict = {

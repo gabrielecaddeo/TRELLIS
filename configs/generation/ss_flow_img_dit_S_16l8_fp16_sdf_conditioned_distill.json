@@ -8,13 +8,13 @@
                 "out_channels": 8,
                 "model_channels": 1024,
                 "cond_channels": 1024,
-                "num_blocks": 24,
+                "num_blocks": 8 ,
                 "num_heads": 16,
-                "mlp_ratio": 4,
+                "mlp_ratio": 2,
                 "patch_size": 1,
                 "pe_mode": "ape",
                 "qk_rms_norm": true,
-                "use_fp16": false,
+                "use_fp16": true,
                 "use_touch": true,
                 "use_encoding_hand": true,
                 "use_weighted_attention": true,
@@ -34,15 +34,15 @@
         }
     },
     "trainer": {
-        "name": "ImageConditionedFlowMatchingCFGTrainerConditioned",
+        "name": "ImageConditionedFlowMatchingCFGDistillationTrainerConditioned",
         "args": {
             "max_steps": 1000000,
-            "batch_size_per_gpu": 16,
+            "batch_size_per_gpu": 8,
             "batch_split": 1,
             "optimizer": {
                 "name": "AdamW",
                 "args": {
-                    "lr": 0.00001,
+                    "lr": 0.00005,
                     "weight_decay": 0.0
                 }
             },
@@ -73,12 +73,19 @@
             "image_cond_model": "dinov2_vitl14_reg",
             "ss_dec_path": "/projects/gcaddeo/train_flow/TRELLIS/outputs/vae_final_all_resume_2",
             "ss_dec_ckpt": "step0300000",
-            "lambda_non_interpenetration_start": 50,
-            "lambda_non_interpenetration_max": 200,
+            "lambda_non_interpenetration_start": 50.0,
+            "lambda_non_interpenetration_max": 200.0,
             "lambda_non_interpenetration_warmup": 1000,
             "lambda_contact": 0.1,
             "use_encoding_hand": true,
-            "use_touch": true
+            "use_touch": true,
+            "teacher_config_path": "/projects/gcaddeo/train_flow_conditioned/TRELLIS/outputs/flow_conditioned_all_losses_resume_32k_resume3_LEAP/config.json",
+            "teacher_ckpt_path": "",
+            "teacher_model_key": "denoiser",
+            "teacher_strict_load": true,
+            "target_loss_weight": 0.25,
+            "distill_loss_weight": 1.0,
+            "use_physics_losses": true
         }
     }
 }

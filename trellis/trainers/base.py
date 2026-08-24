@@ -15,6 +15,59 @@ from .utils import *
 from ..utils.general_utils import *
 from ..utils.data_utils import recursive_to_device, cycle, ResumableSampler
 
+import random
+from torch.utils.data import get_worker_info
+
+def find_bad(obj, path="root"):
+    if isinstance(obj, (np.generic,)):
+        return path, type(obj), obj
+    if isinstance(obj, torch.Tensor):
+        if obj.numel() == 1:
+            return path, type(obj), obj
+        return path, type(obj), f"tensor shape={tuple(obj.shape)}"
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            r = find_bad(v, f"{path}.{k}")
+            if r: return r
+    if isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            r = find_bad(v, f"{path}[{i}]")
+            if r: return r
+    return None
+
+def to_jsonable(x):
+    import numpy as np, torch
+    if isinstance(x, torch.Tensor):
+        return x.item() if x.numel() == 1 else x.detach().cpu().tolist()
+    if isinstance(x, np.generic):
+        return x.item()
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    if isinstance(x, dict):
+        return {k: to_jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [to_jsonable(v) for v in x]
+    return x
+def trellis_worker_init_fn(worker_id: int):
+    # CPU-only safety                                                                                                                                                                                                                                                                     
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    torch.set_num_threads(1)
+
+    # seed                                                                                                                                                                                                                                                                                
+    seed = torch.initial_seed() % (2**32)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    # minimal debug                                                                                                                                                                                                                                                                       
+    wi = get_worker_info()
+    # wi.id == worker_id, wi.num_workers available                                                                                                                                                                                                                                        
+    print(
+        f"[DL-WORKER-INIT] pid={os.getpid()} worker_id={worker_id} "
+        f"num_workers={wi.num_workers if wi else '??'} seed={seed}",
+        flush=True
+    )
+
+
 
 class Trainer:
     """
@@ -23,6 +76,7 @@ class Trainer:
     def __init__(self,
         models,
         dataset,
+        dataset_test,
         *,
         output_dir,
         load_dir,
@@ -52,6 +106,7 @@ class Trainer:
 
         self.models = models
         self.dataset = dataset
+        self.dataset_test = dataset_test
         self.batch_split = batch_split if batch_split is not None else 1
         self.max_steps = max_steps
         self.optimizer_config = optimizer
@@ -135,12 +190,15 @@ class Trainer:
             self.dataset,
             shuffle=True,
         )
+        n_gpus = max(1, torch.cuda.device_count())
+        num_workers_use = min(8, max(2, os.cpu_count() // n_gpus))
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size_per_gpu,
-            num_workers=int(np.ceil(os.cpu_count() / torch.cuda.device_count())),
+            num_workers=num_workers_use,
             pin_memory=True,
             drop_last=True,
+            worker_init_fn=trellis_worker_init_fn,
             persistent_workers=True,
             collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
             sampler=self.data_sampler,
@@ -179,12 +237,13 @@ class Trainer:
         pass
 
     @torch.no_grad()
-    def visualize_sample(self, sample):
+    def visualize_sample(self, sample, *, dataset=None):
         """
         Convert a sample to an image.
         """
-        if hasattr(self.dataset, 'visualize_sample'):
-            return self.dataset.visualize_sample(sample)
+        ds = dataset if dataset is not None else self.dataset
+        if hasattr(ds, 'visualize_sample'):
+            return ds.visualize_sample(sample)
         else:
             return sample
 
@@ -220,11 +279,13 @@ class Trainer:
             )
 
     @torch.no_grad()
-    def snapshot(self, suffix=None, num_samples=64, batch_size=4, verbose=False):
+    def snapshot(self, suffix=None, num_samples=64, batch_size=4, verbose=False, dataset=None):
         """
         Sample images from the model.
         NOTE: This function should be called by all processes.
         """
+        snap_ds = dataset if dataset is not None else self.get_snapshot_dataset()
+                    
         if self.is_master:
             print(f'\nSampling {num_samples} images...', end='')
 
@@ -248,7 +309,7 @@ class Trainer:
             print(key)
             if samples[key]['type'] == 'sample':
                 ## decomment for vae##
-                vis = self.visualize_sample(samples[key]['value'])
+                vis = self.visualize_sample(samples[key]['value'], dataset=snap_ds)
                 if isinstance(vis, tuple):
                     sdf = vis[1]
                     vis = vis[0]
@@ -294,7 +355,7 @@ class Trainer:
                         os.path.join(self.output_dir, 'samples', suffix, f'{key}_{suffix}.jpg'),
                         nrow=int(np.sqrt(num_samples)),
                         normalize=True,
-                        value_range=self.dataset.value_range,
+                        value_range=snap_ds.value_range,
                     )
                 elif samples[key]['type'] == 'number':
                     vmin = samples[key]['value'].min()
@@ -369,7 +430,11 @@ class Trainer:
         Compute training losses.
         """
         pass
-    
+
+    def get_snapshot_dataset(self):
+        # If dataset_test was provided, use it for snapshots; otherwise fallback to train dataset
+        return self.dataset_test if self.dataset_test is not None else self.dataset
+
     def load_data(self):
         """
         Load data.
@@ -437,6 +502,8 @@ class Trainer:
 
         # After you build:
         # decomment for VAE
+        #if dist.is_initialized:
+        #    dist.barrier()
         if self.is_master:
             # if 'encoder' in self.training_models:
             #     register_nan_hooks(self.training_models['encoder'], name_prefix="encoder.")
@@ -444,6 +511,8 @@ class Trainer:
             #     register_nan_hooks(self.training_models['decoder'], name_prefix="decoder.")
             print('\nStarting training...')
             self.snapshot_dataset()
+        #if dist.is_initialized:
+        #    dist.barrier()    
         if self.step == 0:
             self.snapshot(suffix='init')
         else: # resume
@@ -538,7 +607,7 @@ class Trainer:
                 if self.step % self.i_log == 0:
                     ## save to log file
                     log_str = '\n'.join([
-                        f'{step}: {json.dumps(log)}' for step, log in log
+                        f'{step}: {json.dumps(to_jsonable(log))}' for step, log in log
                     ])
                     with open(os.path.join(self.output_dir, 'log.txt'), 'a') as log_file:
                         log_file.write(log_str + '\n')

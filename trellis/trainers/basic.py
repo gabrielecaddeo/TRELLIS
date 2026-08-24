@@ -198,8 +198,8 @@ class BasicTrainer(Trainer):
             model_ckpt = torch.load(read_file_dist(os.path.join(load_dir, 'ckpts', f'{name}_step{step:07d}.pt')), map_location=self.device, weights_only=True)
             model_ckpts[name] = model_ckpt
             model.load_state_dict(model_ckpt)
-            if self.fp16_mode == 'inflat_all':
-                model.convert_to_fp16()
+            #if self.fp16_mode == 'inflat_all':
+            #    model.convert_to_fp16()
         self._state_dicts_to_master_params(self.master_params, model_ckpts)
         del model_ckpts
 
@@ -373,7 +373,7 @@ class BasicTrainer(Trainer):
                     
                     loss, status = self.training_losses(**mb_data)
                     l = loss['loss'] / len(data_list)
-
+                    
                     # if (
                     #     self.is_master
                     #     and i == 0
@@ -430,7 +430,7 @@ class BasicTrainer(Trainer):
 
                         scaled_l.backward()
                          
-                        for name, p in self.training_models['decoder'].named_parameters():
+                        for name, p in self.training_models['denoiser'].named_parameters():
                             if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
                                 with open(os.path.join(self.output_dir,"nan_debug_autograd.log"), "a") as f:
                                     f.write(f"NaN/Inf in gradient of decoder param: {name} at step {self.step}\n")
@@ -460,6 +460,7 @@ class BasicTrainer(Trainer):
                 self.scaler.unscale_(self.optimizer)
             elif self.fp16_mode == 'inflat_all':
                 model_grads_to_master_grads(self.model_params, self.master_params)
+                #print(self.master_params[0].shape)
                 self.master_params[0].grad.mul_(1.0 / (2 ** self.log_scale))
             if isinstance(self.grad_clip, float):
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.master_params, self.grad_clip)

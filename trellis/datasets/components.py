@@ -48,13 +48,23 @@ class StandardDatasetBase(Dataset):
     def __len__(self):
         return len(self.instances)
 
-    def __getitem__(self, index) -> Dict[str, Any]:
+    def __getitem__(self, index, _depth: int = 0) -> Dict[str, Any]:
         try:
             root, instance = self.instances[index]
             return self.get_instance(root, instance)
         except Exception as e:
-            print(e)
-            return self.__getitem__(np.random.randint(0, len(self)))
+            # Retrying a random index hides missing/corrupt contact or pose files. Keep
+            # the retry (a single bad instance should not kill a multi-day run) but count
+            # it and name the instance, and give up rather than recursing forever if a
+            # whole payload directory has gone missing.
+            self._n_failed_reads = getattr(self, '_n_failed_reads', 0) + 1
+            root, instance = self.instances[index]
+            if self._n_failed_reads <= 20 or self._n_failed_reads % 100 == 0:
+                print(f'[dataset] failed read #{self._n_failed_reads} '
+                      f'{root}/{instance}: {type(e).__name__}: {e}', flush=True)
+            if _depth >= 10:
+                raise
+            return self.__getitem__(np.random.randint(0, len(self)), _depth + 1)
         
     def __str__(self):
         lines = []
