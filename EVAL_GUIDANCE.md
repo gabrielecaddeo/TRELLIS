@@ -1,8 +1,12 @@
 # Sampling-time physics guidance: implementation, a/b evaluation, and open state
 
-**Written 2026-08-13.** Self-contained handoff for the guidance/evaluation campaign that
-followed the teacher_v2 stage-2 training (see TEACHER_RETRAIN.md §8.8–8.10 for the
-training side). A new session should be able to continue from this file alone.
+**Written 2026-08-13; §7 is the LIVE results ledger (updated through 2026-08-24).**
+Self-contained handoff for the guidance/evaluation campaign that followed the
+teacher_v2 stage-2 training (see TEACHER_RETRAIN.md §8.8–8.10 for the training
+side). §§1–6 are the 2026-08-13 state (historical but still accurate on code/
+gotchas); §3's job table and §4's queue are SUPERSEDED by ICRA_PLAN.md (rewritten
+2026-08-24: merged four-axis framing + multi-view phases) and by §7's running
+entries. A new session: read ICRA_PLAN.md first, then §7 here.
 
 ---
 
@@ -596,3 +600,69 @@ falling slowly (−4% per 6k steps). No successor queued (MAX_SEGMENTS reached).
    0.322→0.348; contact excess flat at ~7e-3 (≈1.9× the teacher's 3.8e-3).
 4. Remaining paired gap to the teacher at 8 steps: IoU 0.487 vs 0.679, CD 0.093 vs
    0.048, contact excess 2×. Jobs 509–511 queued: same eval on the FINAL 48k EMA.
+
+### 7.8 Student 48k (final chain ckpt), latency table, copy-init ablation start (jobs 509-511/515/514, 2026-08-24)
+
+**48k EMA paired evals** (`ab_guidance_student48k_ds_steps{25,8,4}.json`): the 32k->48k
+slope is steep — undertraining confirmed as the dominant gap driver:
+| student, unguided | 32k | 48k | teacher |
+|---|---|---|---|
+| contact excess @8 | 6.60e-3 | **3.41e-3** | 3.31e-3 |
+| hit1v @8 | 0.494 | 0.597 | 0.639 |
+| IoU @8 | 0.487 | 0.553 | 0.679 |
+| CD @8 | 0.0927 | 0.0774 | 0.0480 |
+| F@0.02 @8 | 0.342 | 0.436 | 0.639 |
+
+**The student's PHYSICS gap is closed at 48k** (contact excess == teacher within noise,
+at every step count); the GEOMETRY gap (IoU/CD/F) remains but is shrinking fast —
+extension to ~82k (jobs 512/513) was the right call. **Absorption reproduces on the
+student**: the 32k OC-Flow re-entry (−11%) is GONE at 48k (4.04e-3 vs unguided
+3.88e-3 at 25 steps) — physics guidance is a substitute for training progress,
+transiently useful and then absorbed, on BOTH models. Low-NFE guidance harm unchanged.
+
+**Latency, H200 batch 1 (`latency_h200.json`)**: the denoiser is ~100% of the budget
+(cond encode 26 ms, decode 10 ms, marching cubes 3 ms). CFG doubles forwards.
+| flow sampling | 25 steps | 8 steps | 4 steps |
+|---|---|---|---|
+| teacher (757M) | 9550 ms | 3253 ms | 1734 ms |
+| student 8x2 (220M) | 3141 ms | **1072 ms** | 572 ms |
+
+=> Real-time (~1 Hz or better) REQUIRES the student: teacher@8 is 3.3 s; student@8 is
+1.07 s and student@4 is 0.57 s. This hardens the distillation motivation. (All fp32+
+TF32; bf16 would cut further — untested.)
+
+**Copy-init ablation (job 514, running)**: init built and strict-loaded (300 tensors,
+0 unexpected); first-step distill_mse 0.60 vs 1.05 from scratch — inherited features
+confirmed doing work. Output: `outputs/distill_s8mlp4_copyinit/`.
+
+### 7.9 Multi-view phase — P0 warp validation PASSED (2026-08-24)
+
+Dataset decision (user): dex lacks usable multi-view groups; the synthetic sets are
+24 views per grasp (`data_pose_norm/<inst>/<inst>_fNNN_meta.json`, per-view GT SDFs
+in `sdfs/`). Held-out `Leap_Hand_test` (319) + `Hands_test` (32) give UNCONTAMINATED
+multi-view groups — same held-out status as all §7 evals.
+
+`tools/multiview_warp.py`: per-view grids are similarity transforms of a canonical
+grasp frame; the metas' convention (found by composition sweep, NOT the naive
+reading): **x_view = s_aug * R_fixed^T @ x_canon + t_aug**, voxel-CENTER sampling,
+SDF values rescale by s_dst/s_src. GT->GT warp across view pairs: object IoU
+0.94-0.97, hand 0.91-0.95, band |sdf diff| ~0.003 = 1/10 voxel (discretization
+noise). Foundation for P1 fusion + P2 consistency guidance is solid.
+
+### 7.10 bf16 latency + P1 fusion smoke (jobs 517/518, 2026-08-24)
+
+**bf16 (autocast, weights fp32) halves everything** (`latency_h200_bf16.json`):
+teacher 25/8/4 = 4.65/1.59/0.85 s (was 9.55/3.25/1.73); student = 1.52/0.52/0.28 s.
+Student@8 ≈ 2 Hz, student@4 ≈ 3.6 Hz. Ranking unchanged; bf16 QUALITY impact not
+yet verified — needs an a/b before the paper quotes bf16 numbers.
+
+**P1 fusion smoke (student 48k @8 steps, n=2 groups — indicative only):** fusion is
+dramatic. Floor-relative contact excess: single 4.4e-3 → K4-mean 3.6e-4 → K8-mean
+BELOW floor. Geometry: IoU 0.703 → 0.858 (K4 median), CD 0.045 → 0.024, NC 0.856 →
+0.945, F@0.02 0.627 → 0.863 — **the fused student beats the single-view TEACHER**
+(IoU 0.679, CD 0.048 paired) at a fraction of the compute. Surprise: plain
+mean/median ≫ vismean — the visibility weighting HURTS (warped vis masks noisy,
+few voters per voxel); drop or rework it. Full runs queued: 519-522 =
+{student48k, teacher52k} × {8, 25} steps, 48 held-out groups each →
+`mv_fusion_{student48k,teacher52k}_s{8,25}.json`. Harness:
+`tools/multiview_fusion_eval.py` (+ `force_view` hook in datasets/components.py).

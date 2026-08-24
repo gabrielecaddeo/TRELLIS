@@ -1,59 +1,103 @@
-# ICRA plan: real-time physics-aware in-hand reconstruction (2026-08-20)
+# ICRA plan: real-time physics-aware in-hand reconstruction (updated 2026-08-24)
 
 **Context.** The hand-conditioned + contact/penetration-loss method is ALREADY
 PUBLISHED (prior paper). This campaign fixed its implementation and retrained the
 teacher (teacher_v2, frozen at EMA step 52000 — TEACHER_RETRAIN.md §8.9). The fixes
-themselves are not a contribution. What remains novel from this campaign:
+themselves are not a contribution. The running results ledger is EVAL_GUIDANCE.md §7.
 
-1. **The guidance-absorption finding** (measured, 5 checkpoints, pre-registered
-   metric): inference-time physics guidance (complete OC-Flow, discrete adjoint)
-   goes from −31% excess contact at ckpt 29k to +45% (harmful) at 52k as
-   training-time physics losses do their work. Guidance is a *substitute* for
-   training/capacity, not a supplement. Data: `ab_guidance_2arm_final{,2,3,4}.json`,
-   `ab_guidance_4arm.json`.
-2. **Nothing architectural.** Honest position agreed with the user 2026-08-20.
+## Paper framing (revised 2026-08-24, agreed with the user)
 
-**Paper framing (agreed): deployment/systems study.**
-"Real-time physics-aware in-hand reconstruction: distillation, guidance, and the
-compute-quality frontier."
-- (i) Real-time demonstration on hardware (user to arrange rig access; the latency
-  test on live captures is the centerpiece — without it, target a workshop instead).
-- (ii) The capacity × steps × guidance Pareto frontier, on held-out synthetic (a/b
-  harness) AND real DexYCB captures (dex benchmark):
-  arms = teacher-unguided / student-unguided / student+greedy-v2 / student+OC-Flow,
-  each at 25 steps and reduced steps (8, 4). Prediction from the absorption curve:
-  the weakened student re-enters the regime where guidance helps — measuring WHERE
-  it re-enters is the paper's organizing result.
-- (iii) The absorption analysis (already measured) as the explaining insight.
+**The compute-quality frontier of physics-aware in-hand reconstruction: capacity,
+steps, guidance, and views.** Thesis: *distill capacity away for speed; recover
+quality from views.* The multi-view work is MERGED with the distillation
+contribution, not adjacent to it.
 
-**Assets already in place.**
-- Frozen teacher EMA 52000 + provenance (`FROZEN_TEACHER.txt`).
-- Inference-repo deployment, parity-verified bit-exact; dex benchmark harness with
-  canonical ICP flags (memory: trellis-eval-icp); teacher_v2@37k already beats the
-  old teacher on real captures: CD² 0.0349/0.0119 vs 0.0458/0.0181, n=989/992.
-  52k refresh running (jobs 486/487).
-- a/b harness (`tools/ab_eval_guidance.py`) works for ANY checkpoint incl. students.
-- Distillation trainer + config: audited and FIXED 2026-08-20 (see EVAL_GUIDANCE.md
-  §3 note; trainer physics now identical to stage-2's; config
-  `..._distill_teacherv2.json` points at the frozen teacher, λ 30/1.0 relative,
-  fp32 student). Needs a GPU smoke run before a real launch.
+Findings that anchor each axis (details + tables in EVAL_GUIDANCE.md §7):
+1. **Steps are nearly free** (§7.1, §7.2): unguided teacher is step-invariant to 4
+   steps on held-out synthetic AND real DexYCB (8 steps == 25 to 3 decimals).
+2. **Physics guidance is transient scaffolding** (§7.1, §7.6, §7.8): it helps any
+   undertrained model (teacher@29k, student@32k) and is absorbed by training on
+   every sufficiently-trained one; always harmful at low NFE (large-dt corrections
+   on noisy x̂0). Deployment: unguided, both models.
+3. **Capacity costs geometry, and the student is REQUIRED for real time** (§7.8):
+   student 220M vs teacher 757M; H200 bf16 flow latency student@8 = 0.52 s (~2 Hz),
+   teacher@8 = 1.59 s. Student@48k matches teacher physics; geometry gap remains
+   (IoU 0.55 vs 0.68).
+4. **Views buy the quality back** (§7.10, smoke n=2; full runs 519–522 pending):
+   fused student (K=4, median) beat the single-view teacher on every geometry
+   metric at a fraction of the compute. Prediction to test at scale: the
+   measurement axis (views) does NOT absorb, unlike the prior axis (physics
+   guidance) — the paper's scientific claim.
 
-**Execution order (next session).**
-1. Read 486/487 (frozen-teacher dex numbers → final old-vs-new table).
-2. GPU smoke-test the fixed distillation trainer (few hundred steps, 1 GPU:
-   watch ni_floor/contact_floor appear in the log, loss magnitudes sane,
-   distill_mse decreasing). Template: tools/train_teacher_v2.sbatch pattern with
-   the distill config; a dedicated sbatch does not exist yet.
-3. ASK USER, then launch full distillation (24h chained segments, 2 GPUs).
-4. While distilling: extend the a/b harness with a --steps sweep (8, 4) and run
-   the teacher rows of the Pareto table.
-5. Student boundary evals with the SAME harness (unguided + guided_v2 + oc_flow):
-   does guidance help the student? At which capacity/steps does it re-enter?
-6. Convert best student via the parity-tested port (teacher_v2_port/) and run the
-   dex benchmark rows; latency measurements (steps × blocks) on H200 + the rig.
-7. Optional step-distillation (consistency/shortcut style) if time allows —
-   the only genuinely new machinery in the plan.
+## Multi-view phases (P0–P4)
 
-**Open questions for the user.**
-- Rig access / camera setup timeline for (i).
-- Student design: keep 8 blocks / mlp_ratio 2 (prior runs) or sweep capacity too.
+Dataset decision (user, 2026-08-24): dex lacks usable multi-view groups; use the
+24-view synthetic grasps. Held-out `datasets_split/Leap_Hand_test` (319 groups) +
+`Hands_test` (32) are UNCONTAMINATED multi-view sets. Machinery:
+`tools/multiview_warp.py` (validated similarity warps: x_view = s·Rᵀ·x_canon + t,
+voxel centers, SDF values scaled by s_dst/s_src; GT→GT IoU 0.94–0.97, |diff| ~1/10
+voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
+
+- **P0 — warp module + GT validation: DONE** (§7.9).
+- **P1 — fusion baseline: RUNNING** (jobs 519–522: {student48k, teacher52k} ×
+  {8, 25} steps × 48 groups; K ∈ {2,4,8}, arms mean/median/vismean vs single).
+  Smoke verdict §7.10; vismean is the worst arm — drop or rework.
+- **P2 — cross-view consistency guidance**: joint K-view sampling on the
+  `sample_guided_v2` skeleton, energy = pairwise warped-SDF disagreement on x̂0.
+  Run on both models; the teacher run tests measurement-vs-prior absorption.
+  25-step mode by default (low-NFE guidance is known-harmful).
+- **P3 — frontier assembly**: batch-K latency (one batched forward = the
+  deployment mode; extend bench_latency), the capacity × steps × views Pareto
+  table, pick + name the deployment operating point. bf16 QUALITY a/b before
+  quoting bf16 latency in the paper.
+- **P4 (stretch, gate on P1/P2 + deadline)** — recursive fusion distilled into the
+  student: warped previous-reconstruction as an extra conditioning channel
+  (architecture pattern exists: `input_layer_x0h`), trained with pose-jittered
+  priors → a per-frame filter at student@8 cost.
+
+## Training state
+
+- **Teacher**: FROZEN at EMA 52000 (`denoiser_teacher_v2_FROZEN.pt`); ledger
+  closed; never resume; 53k/54k ckpts are unevaluated leftovers.
+- **Student (8 blocks, mlp_ratio 2, from scratch)**: chain 492/493/498 done →
+  step 48000; extension 512/513 running → ~82k. Physics gap to teacher closed at
+  48k; geometry improving steeply (§7.8). Final ckpt choice for the paper: best of
+  the extension by paired a/b.
+- **Copy-init ablation (8 blocks, mlp_ratio 4, teacher-layer init)**: chain
+  514/516 running → `outputs/distill_s8mlp4_copyinit/`. Started at distill_mse
+  0.60 vs 1.05 from scratch. Read: does copy-init reach the same quality in far
+  fewer steps / end higher?
+- Distillation machinery: trainer physics block is a faithful stage-2 port
+  (audited+fixed 2026-08-20, smoke-passed job 488).
+
+## Execution order (remaining)
+
+1. Read P1 full runs (519–522) → EVAL_GUIDANCE §7.11; decide K and fusion arm.
+2. P2 consistency-guidance sampler + runs (both models).
+3. Read extension (~82k) + copy-init ablation checkpoints with the paired a/b
+   (`--data_seed 1337`); pick the paper's student.
+4. P3: batch-K latency, bf16 quality a/b, assemble the frontier table.
+5. Real-capture confirmation of the chosen operating point: student dex rows
+   (convert via parity-tested port; ICP canonical flags) + rig latency demo
+   (user to arrange rig access — without it, target a workshop).
+6. P4 if gates pass and time allows.
+
+## Open questions for the user
+- Rig access / camera setup timeline (the latency demo on live captures is the
+  centerpiece for ICRA vs workshop).
+- P4 in or out of scope for this deadline.
+- Extend the 8×2 student beyond ~82k if the paired a/b still shows slope?
+
+## Hard rules (unchanged)
+- Mesh evals ALWAYS use ICP with the canonical flag set (memory trellis-eval-icp).
+- Cross-model a/b runs ALWAYS pass `--data_seed 1337` (§7.6 pairing gotcha) and
+  name the frozen ckpts explicitly (never `latest_ema` on the teacher dir).
+- GPU work only via sbatch on gpu-h200 (24h cap)/cpu; login node OOMs; prefer
+  SLURM --dependency chains; pre-queue successors; STOP_CHAIN to stop.
+- Ask the user before anything ≥ multi-day GPU cost.
+
+---
+Historical note: the 2026-08-20 version of this plan predicted guidance re-entry
+on the capacity axis as the organizing result. Measured outcome (§7.5–§7.8):
+re-entry is a *training-progress* effect, absorbed as the student converges — the
+organizing result is now the four-axis frontier above.

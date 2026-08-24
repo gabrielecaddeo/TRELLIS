@@ -277,7 +277,9 @@ class ImageConditionedMixinRotationConditioned:
         with open(os.path.join(image_root, 'transforms.json')) as f:
             meta_all = json.load(f)
 
-        if self.inference:
+        if getattr(self, 'force_view', None) is not None:
+            view = int(self.force_view)
+        elif self.inference:
             view = 0
         else:
             view = np.random.randint(len(meta_all['frames']))

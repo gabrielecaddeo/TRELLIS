@@ -40,6 +40,10 @@ def main():
                     help="name:dir:ckpt triplets, e.g. teacher:outputs/teacher_v2_stage2_physics:denoiser_ema0.9999_step0052000.pt")
     ap.add_argument("--steps", type=int, nargs="+", default=[25, 8, 4])
     ap.add_argument("--reps", type=int, default=20)
+    ap.add_argument("--autocast", choices=["bf16", "fp16"], default=None,
+                    help="Wrap flow sampling + decode in torch.autocast with this "
+                         "dtype (weights stay fp32) — the cheap deployment-realistic "
+                         "speed mode. Default: pure fp32 (TF32 matmuls).")
     ap.add_argument("--output", default="outputs/diagnostics/latency_h200.json")
     args = ap.parse_args()
 
@@ -68,7 +72,12 @@ def main():
     data = to_cuda(next(iter(trainer.dataloader)))
     x_0 = data.pop("x_0")
 
+    import contextlib
+    ac = ((lambda: torch.autocast("cuda", dtype=torch.bfloat16 if args.autocast == "bf16"
+                                  else torch.float16)) if args.autocast else contextlib.nullcontext)
+
     res = {"meta": {"reps": args.reps, "batch": 1, "steps": args.steps,
+                    "autocast": args.autocast,
                     "gpu": torch.cuda.get_device_name(0)}}
 
     mean, std = cuda_time(lambda: trainer.get_inference_cond(**data), reps=args.reps)
@@ -94,7 +103,7 @@ def main():
         res[name] = {"ckpt": ckpt, "params_M": n_params / 1e6}
         for steps in args.steps:
             def run():
-                with torch.no_grad():
+                with torch.no_grad(), ac():
                     out = sampler.sample(model, noise, cond=pos, neg_cond=neg,
                                          steps=steps, rescale_t=3.0, cfg_strength=5.0,
                                          cfg_interval=(0.5, 1.0), verbose=False)
@@ -106,7 +115,10 @@ def main():
         torch.cuda.empty_cache()
 
     z = latent_holder["z"]
-    mean, std = cuda_time(lambda: trainer.ss_dec(z), reps=args.reps)
+    def dec():
+        with torch.no_grad(), ac():
+            trainer.ss_dec(z)
+    mean, std = cuda_time(dec, reps=args.reps)
     res["decode_ms"] = {"mean": mean, "std": std}
     print(f"ss_dec decode: {mean:.1f} +- {std:.1f} ms")
 
