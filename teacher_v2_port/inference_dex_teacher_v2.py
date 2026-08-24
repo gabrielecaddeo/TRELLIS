@@ -21,7 +21,12 @@ from trellis.pipelines import TrellisImageTo3DPipelineConditioned
 REPO = "/projects/gcaddeo/inference/TRELLIS"
 PIPELINE_DIR = f"{REPO}/teacher_v2_stage2"
 DATA_ROOT = f"{REPO}/dex-dataset-total-total"
-OUT_ROOT = f"{REPO}/meshes_results_marching_cubes_teacher_v2"
+OUT_ROOT = os.environ.get("DEX_OUT_ROOT") or f"{REPO}/meshes_results_marching_cubes_teacher_v2"
+# DEX_STEPS overrides the sparse-structure sampler's step count (pipeline json
+# default: 25). Unset -> {} -> behavior identical to the parity-tested runs.
+SAMPLER_PARAMS = (
+    {"steps": int(os.environ["DEX_STEPS"])} if os.environ.get("DEX_STEPS") else {}
+)
 
 pipeline = TrellisImageTo3DPipelineConditioned.from_pretrained(PIPELINE_DIR)
 pipeline.cuda()
@@ -60,6 +65,7 @@ for folder in folders:
                 instance_name=string_name,
                 view=view_id,
                 seed=seed,
+                sparse_structure_sampler_params=SAMPLER_PARAMS,
             )
         except Exception:
             print(f"problem: {string_name}")
