@@ -666,3 +666,113 @@ few voters per voxel); drop or rework it. Full runs queued: 519-522 =
 {student48k, teacher52k} × {8, 25} steps, 48 held-out groups each →
 `mv_fusion_{student48k,teacher52k}_s{8,25}.json`. Harness:
 `tools/multiview_fusion_eval.py` (+ `force_view` hook in datasets/components.py).
+
+### 7.11 P1 fusion at scale (jobs 519–522, n=48, 2026-08-24) + P2 smoke (523)
+
+`mv_fusion_{student48k,teacher52k}_s{8,25}.json`, 48 held-out groups, K-view
+median fusion (the winning arm; vismean confirmed harmful, retired):
+
+| @8 steps unguided | single | median_K4 | median_K8 |
+|---|---|---|---|
+| student48k: c_ex / IoU / CD / F.02 | 4.1e-3 / 0.477 / 0.0756 / 0.445 | 1.0e-3 / 0.548 / 0.0596 / 0.524 | **2.4e-4 / 0.574 / 0.0556 / 0.562** |
+| teacher52k: same | 3.9e-3 / 0.607 / 0.0501 / 0.606 | 5.2e-4 / 0.670 / 0.0406 / 0.693 | **7.5e-5 / 0.713 / 0.0358 / 0.742** |
+
+(25-step rows within noise of 8-step for both models — step-invariance again.)
+**Verdicts.** (i) Fusion is monotone in K for both models: K8 median removes
+~95% of excess contact and buys +0.10 IoU / −26–29% CD / +22–26% F@0.02. (ii)
+Smoke's "fused student beats single teacher" does NOT hold at n=48 (0.574 vs
+0.607 IoU) — close at ~3× lower latency; the 82k / copy-init student may close
+it. (iii) Teacher K8-median (IoU 0.716, CD 0.0355) is the best quality measured
+in this campaign — the offline/refinement row.
+
+**P2 smoke (student@25, n=2, `mv_p2_smoke.json`): consistency guidance improves
+the SINGLE view** — contact excess 4.8e-3 → 2.0e-3 (−58%), IoU 0.695 → 0.727,
+NC 0.856 → 0.892: each view absorbs the others' information *during sampling*.
+Guided-then-fused ≈ plain-fused in this tiny sample. Full runs queued: 524
+(student) / 525 (teacher) → `mv_p2_{student48k,teacher52k}_s25.json`; the teacher
+run is the measurement-vs-prior absorption test.
+
+### 7.12 L40S partition validated for evals (job 526, 2026-08-24)
+
+`gpu-l40s` (4 idle nodes, QOS: 2 concurrent jobs, SEPARATE from the 4-job/96-CPU
+h200 quota) runs the full eval stack correctly: the 2-group fusion smoke
+reproduced H200 numbers (IoU 0.7032 vs 0.7029 single; 0.8082 vs 0.8024 K8-median
+— normal cross-arch drift) in ~1 min. Usage: submit any existing eval sbatch with
+`sbatch --partition=gpu-l40s ...` (CLI overrides the #SBATCH partition; same
+conda env works — sm_86 kernels run on Ada). Default routing from now on: EVALS
+→ gpu-l40s, TRAINING → gpu-h200. NOT validated for training runs.
+
+### 7.13 P2 full results + bf16 parity + full-set teacher fusion (jobs 524/525/527/529, 2026-08-24)
+
+**The measurement-vs-prior contrast is MEASURED (the paper's scientific core).**
+On the SAME fully-trained teacher where physics guidance is harmful (§7.6:
+guided_v2 IoU 0.675→0.659, contact excess 2.2×), cross-view consistency guidance
+HELPS: single-view IoU 0.607→0.625, CD 0.0502→0.0474 (−6%), F@0.02 0.603→0.617
+(`mv_p2_teacher52k_s25.json`, n=48, paired noise). On the student the same effect
+is 3× larger (IoU 0.482→0.543, CD −10%, F@0.02 +15% — `mv_p2_student48k_s25.json`).
+**Prior-based guidance gets absorbed by training; measurement-based guidance does
+not — and the weaker the model, the more the measurements are worth.**
+
+**Guidance and fusion do NOT stack**: median-fusing the consistency-guided views
+is worse than fusing unguided ones (teacher IoU 0.677 vs 0.716; student 0.570 vs
+0.578) — mid-sampling consensus correlates the views' errors, destroying the
+independence that fusion exploits. Deployment rule: guide when the output is one
+view; fuse independent views when K are available; never both.
+
+**bf16 = fp32 quality** (`ab_guidance_teacher52k_ds_steps8_bf16.json`, paired
+n=64): every metric within noise (IoU 0.682 vs 0.679, CD 0.0474 vs 0.0480).
+The §7.10 bf16 latency table is quotable: student@8 = 0.52 s (~2 Hz) is the
+deployment mode at zero quality cost.
+
+**Full-test-set teacher fusion @8 steps (n=351, `mv_fusion_teacher52k_s8_full.json`)
+— paper-grade, frozen-teacher-final:**
+| arm | contact −floor | IoU | CD | NC | F@0.02 | EMD |
+|---|---|---|---|---|---|---|
+| single | 2.16e-3 | 0.605 | 0.0586 | 0.849 | 0.568 | 0.0783 |
+| median_K2 | −3.6e-4 | 0.634 | 0.0580 | 0.864 | 0.599 | 0.0825 |
+| median_K4 | −1.7e-3 | 0.685 | 0.0474 | 0.882 | 0.669 | 0.0738 |
+| median_K8 | **−2.5e-3** | **0.716** | **0.0427** | **0.894** | **0.716** | 0.0710 |
+Contact excess is BELOW the decoder floor from K=2 on. n=48 subset numbers (§7.11)
+confirmed within ~0.01 IoU. 25-step full-set run = job 528 (L40S, in flight).
+
+### 7.14 Exact hand-visibility fusion weighting (job 530, 2026-08-24) — median still wins
+
+User insight tested: hand occlusion is EXACTLY computable (the hand SDF is GT
+conditioning), so `vishand` = soft directional weight exp(−α·hand voxels between
+voxel and camera), floor 0.25, only counting hand on the CAMERA side (hand behind
+the object correctly contributes zero). Student@8, n=48, paired
+(`mv_vishand_student48k_s8.json`):
+mean_K8 IoU 0.543 / CD 0.0762 < **vishand_K8 0.552 / 0.0712** < **median_K8
+0.573 / 0.0559**. Verdict: exact occlusion weighting beats the plain mean but
+NOT the robust vote — occluded views' generative completions carry real signal,
+and the majority vote uses it while rejecting outliers. **Median stays the
+paper's fusion arm**; ablation row mean < vishand < median is itself presentable.
+**Hybrid tested too (job 531, user proposal, `mv_hybrid_student48k_s8.json`)**:
+smooth gate exp(−(std/τ)², τ=1 voxel) blending vishand-weighted mean (agreement
+regions) into median (disagreement regions) — TIES the median exactly (IoU 0.572
+vs 0.573, CD 0.0562 vs 0.0558): where views agree, mean≈median so the gate adds
+nothing; where they disagree, the hybrid IS the median. Ablation ladder final:
+**mean < vishand < hybrid ≈ median** — the median's crown is tested, not assumed.
+Hand-crafted fusion branch CLOSED; only the learned aggregator could beat it.
+
+### 7.15 Overnight 2026-08-25: full-set 25-step table, copy-init pulling ahead
+
+**Full-set teacher fusion @25 (job 528, n=351, `mv_fusion_teacher52k_s25_full.json`)**:
+single IoU 0.603 / CD 0.0590 → median_K8 **0.719 / 0.0425** — matches the 8-step
+full-set table (§7.13) to ~0.003 IoU: step-invariance holds at n=351 and the
+teacher fusion tables are COMPLETE (both step counts, full held-out set).
+
+**Copy-init 8×4 ablation is far ahead of from-scratch at equal steps** (segment 1
+ended at 16k, graceful wall; segment 2 = job 516 running → ~32k):
+| distill_mse / target_mse | @500 | @4k | @8k | @16k |
+|---|---|---|---|---|
+| copy-init 8×4 | 0.124 / 0.264 | 0.069 / 0.212 | 0.061 / 0.203 | **0.052 / 0.193** |
+| from-scratch 8×2 | 0.342 / 0.483 | — | 0.088 / 0.228 | 0.076 / 0.217 |
+
+Copy-init at 16k ≈ from-scratch at **48–65k** in loss terms (the 8×2 needed 48k+
+to reach 0.054/0.195) — a ~3× training-compute win, still falling. Confound to
+keep honest: 8×4 has ~1.5× the 8×2's parameters, so init and capacity effects are
+mixed; the paired a/b (jobs 532/533, raw 16k ckpt) gives the quality-side read.
+Extension (8×2) segment 4 ended at 65k (distill 0.0493/target 0.188, slope
+flattening); segment 5 (513) → ~82k tomorrow ~10:00. Queued: 532/533 = copy-init
+16k raw @8/25; 534 = student 65k EMA @8 (all paired, `--data_seed 1337`).

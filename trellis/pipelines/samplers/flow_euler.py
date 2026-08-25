@@ -680,6 +680,98 @@ class FlowEulerSampler(Sampler):
         ret = edict({"samples": x_final.detach(), "pred_x_t": [], "pred_x_0": []})
         return ret
 
+    def sample_multiview_consistency(
+        self,
+        model,
+        noise,
+        decoder,
+        warp_coords,          # [K,64,64,64,3] grid_sample coords: ref grid -> each view's grid
+        sdf_scales,           # [K] value scale s_ref/s_k per view
+        cond: dict | None = None,
+        neg_cond: dict | None = None,
+        steps: int = 25,
+        rescale_t: float = 1.0,
+        rho: float = 0.2,
+        time_power: float = 1.0,
+        guidance_skip: int = 5,
+        band: float = 0.15,
+        verbose: bool = True,
+        **kwargs
+    ):
+        """P2 cross-view consistency guidance (EVAL_GUIDANCE.md §7.9 plan).
+
+        The batch is K views of ONE rigid grasp, sampled jointly. At each guided
+        step the K x̂0 decodes are warped into the reference view's grid (known
+        similarity transforms -> tools/multiview_warp.torch_warp) and the energy
+        is the across-view VARIANCE of the warped SDFs over the near-consensus
+        band. Unlike the physics energies this injects *measurements* (the other
+        views), not a training prior — the absorption argument does not apply.
+        DPS-style like sample_guided_v2: gradients flow only through the direct
+        affine path to x̂0 and the decoder, v is detached; same relative,
+        t-weighted trust region; rho=0 recovers plain Euler exactly.
+        """
+        import torch.nn.functional as tF
+
+        model.eval()
+        decoder.eval()
+        t_seq = np.linspace(1.0, 0.0, steps + 1)
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = [(float(t_seq[i]), float(t_seq[i + 1])) for i in range(steps)]
+
+        x = noise.detach().clone()
+        K = x.shape[0]
+        assert warp_coords.shape[0] == K and sdf_scales.shape[0] == K
+        expand = (K,) + (1,) * (x.ndim - 1)
+        scales = sdf_scales.view(K, 1, 1, 1, 1).to(x.device)
+        pad = 1.0
+        ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+
+        for step_i, (t, t_prev) in enumerate(t_pairs):
+            with torch.no_grad():
+                v = self._inference_model(model, x, t, cond, neg_cond, **kwargs)
+
+            guidance_on = rho > 0 and step_i >= guidance_skip
+            if guidance_on:
+                with torch.enable_grad():
+                    x_var = x.detach().requires_grad_(True)
+                    pred_x0, _ = self._v_to_xstart_eps(x_t=x_var, t=t, v=v)
+                    sdf = decoder(pred_x0)                                # [K,1,...]
+                    shifted = sdf - pad / scales
+                    warped = (tF.grid_sample(shifted, warp_coords, mode="bilinear",
+                                             padding_mode="zeros",
+                                             align_corners=False)
+                              + pad / scales) * scales                    # ref frame
+                    consensus = warped.mean(dim=0, keepdim=True).detach()
+                    band_mask = (consensus.abs() < band).float()
+                    var = ((warped - warped.mean(dim=0, keepdim=True)) ** 2)
+                    E = (var * band_mask).sum() / band_mask.sum().clamp_min(1.0) / K
+                    g = torch.autograd.grad(E, x_var)[0]
+                with torch.no_grad():
+                    pred_x0 = pred_x0.detach()
+                    g_norm = g.view(K, -1).norm(dim=1)
+                    v_norm = v.view(K, -1).norm(dim=1)
+                    w = rho * (1.0 - t) ** time_power
+                    scale = torch.where(
+                        g_norm > 1e-8,
+                        w * v_norm / g_norm.clamp_min(1e-8),
+                        torch.zeros_like(g_norm))
+                    u = g * scale.view(expand)
+                if verbose:
+                    print(f"  [mv-consist] step {step_i}: E={E.item():.5g}")
+            else:
+                with torch.no_grad():
+                    pred_x0, _ = self._v_to_xstart_eps(x_t=x, t=t, v=v)
+                u = torch.zeros_like(x)
+
+            dt = t - t_prev
+            with torch.no_grad():
+                x = x - dt * (v + u)
+            ret.pred_x_t.append(x.detach())
+            ret.pred_x_0.append(pred_x0)
+
+        ret.samples = x.detach()
+        return ret
+
     def sample_velocity_conditioned_oc2(
             self,
             model,

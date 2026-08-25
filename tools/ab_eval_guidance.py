@@ -117,6 +117,11 @@ def main():
                     help="Build the model with use_hand_pe=False -- required to "
                          "faithfully evaluate pre-fix checkpoints (the old teacher), "
                          "whose forward never added hand positional embeddings.")
+    ap.add_argument("--autocast", choices=["bf16", "fp16"], default=None,
+                    help="Run the UNGUIDED arm's sampling under torch.autocast "
+                         "with this dtype (weights fp32) — the deployment speed "
+                         "mode. Quality-parity check vs the fp32 rows; other "
+                         "arms unaffected.")
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--data_seed", type=int, default=None,
                     help="Re-seed torch's global RNG with this value right before the "
@@ -213,9 +218,12 @@ def main():
         cond_args = trainer.get_inference_cond(**data)
         pos, neg = cond_args["cond"], cond_args["neg_cond"]
 
+        import contextlib
+        ac = ((lambda: torch.autocast("cuda", dtype=torch.bfloat16 if args.autocast == "bf16"
+                                      else torch.float16)) if args.autocast else contextlib.nullcontext)
         samples = {}
         if "unguided" in arms:
-            with torch.no_grad():
+            with torch.no_grad(), ac():
                 samples["unguided"] = sampler.sample(
                     model, noise, cond=pos, neg_cond=neg,
                     steps=args.steps, rescale_t=args.rescale_t,
@@ -304,7 +312,7 @@ def main():
         "contact_floor": args.contact_floor, "oc_n_outer": args.oc_n_outer,
         "oc_eta_u": args.oc_eta_u, "oc_u_max_ratio": args.oc_u_max_ratio,
         "oc_use_jacobian": not args.oc_no_jacobian,
-        "seed": args.seed, "data_seed": args.data_seed,
+        "seed": args.seed, "data_seed": args.data_seed, "autocast": args.autocast,
     }}
     for arm in acc:
         results[arm] = {}

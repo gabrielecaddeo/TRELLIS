@@ -23,11 +23,16 @@ Findings that anchor each axis (details + tables in EVAL_GUIDANCE.md §7):
    student 220M vs teacher 757M; H200 bf16 flow latency student@8 = 0.52 s (~2 Hz),
    teacher@8 = 1.59 s. Student@48k matches teacher physics; geometry gap remains
    (IoU 0.55 vs 0.68).
-4. **Views buy the quality back** (§7.10, smoke n=2; full runs 519–522 pending):
-   fused student (K=4, median) beat the single-view teacher on every geometry
-   metric at a fraction of the compute. Prediction to test at scale: the
-   measurement axis (views) does NOT absorb, unlike the prior axis (physics
-   guidance) — the paper's scientific claim.
+4. **Views buy the quality back — MEASURED at scale** (§7.11–§7.15): K8-median
+   fusion gives +0.10–0.11 IoU and −26–29% CD to BOTH models; teacher full-set
+   (n=351) tables final at 8 AND 25 steps (single IoU 0.60 → K8 0.72). Fusion-arm
+   ablation CLOSED: mean < vishand (exact hand-occlusion weights) < hybrid ≈
+   **median** — robust vote wins because occluded views' generative completions
+   are informative. **The measurement-vs-prior claim is MEASURED (§7.13)**:
+   consistency guidance helps the same teacher that physics guidance hurts
+   (single-view IoU +0.018; student +0.061); guidance and fusion do NOT stack
+   (consensus correlates errors). bf16 == fp32 quality → deployment mode =
+   student@8 bf16 = 0.52 s.
 
 ## Multi-view phases (P0–P4)
 
@@ -39,48 +44,49 @@ voxel centers, SDF values scaled by s_dst/s_src; GT→GT IoU 0.94–0.97, |diff|
 voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
 
 - **P0 — warp module + GT validation: DONE** (§7.9).
-- **P1 — fusion baseline: RUNNING** (jobs 519–522: {student48k, teacher52k} ×
-  {8, 25} steps × 48 groups; K ∈ {2,4,8}, arms mean/median/vismean vs single).
-  Smoke verdict §7.10; vismean is the worst arm — drop or rework.
-- **P2 — cross-view consistency guidance**: joint K-view sampling on the
-  `sample_guided_v2` skeleton, energy = pairwise warped-SDF disagreement on x̂0.
-  Run on both models; the teacher run tests measurement-vs-prior absorption.
-  25-step mode by default (low-NFE guidance is known-harmful).
-- **P3 — frontier assembly**: batch-K latency (one batched forward = the
-  deployment mode; extend bench_latency), the capacity × steps × views Pareto
-  table, pick + name the deployment operating point. bf16 QUALITY a/b before
-  quoting bf16 latency in the paper.
-- **P4 (stretch, gate on P1/P2 + deadline)** — recursive fusion distilled into the
-  student: warped previous-reconstruction as an extra conditioning channel
-  (architecture pattern exists: `input_layer_x0h`), trained with pose-jittered
-  priors → a per-frame filter at student@8 cost.
+- **P1 — fusion baseline: DONE** (§7.11 n=48 both models; §7.13/§7.15 full-set
+  n=351 teacher tables at 8+25 steps; §7.14 fusion-arm ablation closed → median).
+- **P2 — consistency guidance: DONE** (§7.13; sampler
+  `sample_multiview_consistency` in flow_euler.py; helps single-view output,
+  does not stack with fusion; measurement-vs-prior contrast measured).
+- **P3 — frontier assembly: NEXT.** Remaining pieces: batch-K latency
+  (extend bench_latency: K views in one batched forward, bf16), the final
+  capacity × steps × views Pareto table on the CHOSEN student, and the
+  deployment operating point. bf16 quality parity already verified (§7.13).
+- **P4 (stretch, decision pending with user)** — recursive fusion distilled into
+  the student (warped prior as conditioning channel); the learned 3D-CNN fusion
+  aggregator is a cheaper sibling that would also subsume the fusion-arm branch.
 
 ## Training state
 
 - **Teacher**: FROZEN at EMA 52000 (`denoiser_teacher_v2_FROZEN.pt`); ledger
   closed; never resume; 53k/54k ckpts are unevaluated leftovers.
-- **Student (8 blocks, mlp_ratio 2, from scratch)**: chain 492/493/498 done →
-  step 48000; extension 512/513 running → ~82k. Physics gap to teacher closed at
-  48k; geometry improving steeply (§7.8). Final ckpt choice for the paper: best of
-  the extension by paired a/b.
-- **Copy-init ablation (8 blocks, mlp_ratio 4, teacher-layer init)**: chain
-  514/516 running → `outputs/distill_s8mlp4_copyinit/`. Started at distill_mse
-  0.60 vs 1.05 from scratch. Read: does copy-init reach the same quality in far
-  fewer steps / end higher?
+- **Student A (8 blocks, mlp_ratio 2, from scratch)**: 492/493/498 → 48k; ext
+  segment 4 (512) → 65k (distill 0.0493, slope flattening); segment 5 (513)
+  running → ~82k, ends 2026-08-26 ~10:00. Physics gap closed at 48k (§7.8).
+- **Student B (copy-init, 8 blocks, mlp_ratio 4, teacher layers 0,3,...,21)**:
+  segment 1 (514) → 16k with distill 0.052/target 0.193 = from-scratch's 48–65k
+  level (~3× compute win, §7.15; capacity confound: 1.5× params of A). Segment 2
+  (516) running → ~32k, ends 2026-08-26 ~10:10. LIKELY the paper's student if
+  the paired a/b confirms the loss-side advantage.
 - Distillation machinery: trainer physics block is a faithful stage-2 port
   (audited+fixed 2026-08-20, smoke-passed job 488).
 
 ## Execution order (remaining)
 
-1. Read P1 full runs (519–522) → EVAL_GUIDANCE §7.11; decide K and fusion arm.
-2. P2 consistency-guidance sampler + runs (both models).
-3. Read extension (~82k) + copy-init ablation checkpoints with the paired a/b
-   (`--data_seed 1337`); pick the paper's student.
-4. P3: batch-K latency, bf16 quality a/b, assemble the frontier table.
-5. Real-capture confirmation of the chosen operating point: student dex rows
-   (convert via parity-tested port; ICP canonical flags) + rig latency demo
+1. Read jobs 532/533 (copy-init 16k raw a/b @8/25) + 534 (student-A 65k @8):
+   quality-side read on copy-init vs from-scratch and the 48k→65k slope.
+2. 2026-08-26 ~10:00: final ckpts land (A ~82k EMA, B ~32k EMA — B's EMA is
+   copy-init-seeded so residue is benign). Paired a/b both (25/8/4, 3 arms,
+   `--data_seed 1337`) → pick the paper's student.
+3. Full-set (n=351) fusion tables for the chosen student at 8 (+25) steps.
+4. P3: batch-K bf16 latency for the chosen student; assemble the final
+   capacity × steps × views frontier table; name the operating point.
+5. Real-capture confirmation: chosen student dex rows (convert via the
+   parity-tested port teacher_v2_port/convert_teacher_v2.py — NOTE it must be
+   generalized for the student arch; ICP canonical flags) + rig latency demo
    (user to arrange rig access — without it, target a workshop).
-6. P4 if gates pass and time allows.
+6. P4 / learned-aggregator if time allows (user decision).
 
 ## Open questions for the user
 - Rig access / camera setup timeline (the latency demo on live captures is the

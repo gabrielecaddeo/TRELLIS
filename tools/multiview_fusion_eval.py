@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from diagnose_physics_losses import DiagnosticTrainer  # noqa: E402
 from ab_eval_guidance import sdf_metrics  # noqa: E402
 from mesh_metrics import paired_mesh_metrics  # noqa: E402
-from multiview_warp import warp_sdf  # noqa: E402
+from multiview_warp import warp_sdf, torch_warp_coords  # noqa: E402
 
 from trellis import models, datasets  # noqa: E402
 from trellis.pipelines import samplers  # noqa: E402
@@ -33,11 +33,25 @@ TENSOR_KEYS = ["x_0", "x0_hand", "cond", "mask_hand", "mask_obj", "cond_mask", "
 def visibility(scene_sdf):
     """1.0 where the voxel is unoccluded along the view axis (camera at +z looking
     -z, meta pose2d view_axis=-z; grid axis k -> z): no inside-scene voxel with
-    larger z in the same (x,y) column."""
+    larger z in the same (x,y) column. RETIRED for fusion weighting (noisy: built
+    from the *predicted* object; see EVAL_GUIDANCE 7.11) — kept for reference."""
     inside = scene_sdf < 0
     occ = np.zeros_like(inside)
     occ[..., :-1] = np.flip(np.maximum.accumulate(np.flip(inside[..., 1:], axis=2), axis=2), axis=2)
     return (~occ).astype(np.float32)
+
+
+def hand_visibility(sdf_hand, alpha=1.0, floor=0.25):
+    """Soft, EXACT hand-occlusion weight (user insight 2026-08-24): the hand SDF
+    is ground-truth conditioning, so 'how much hand does this view's ray pass
+    through before reaching the voxel' is noise-free. w = exp(-alpha * number of
+    inside-hand voxels above along +z), floored so occluded views keep a weak
+    vote (their generative completion is still informative)."""
+    inside = (sdf_hand < 0).astype(np.float32)
+    above = np.zeros_like(inside)
+    above[..., :-1] = np.flip(np.cumsum(np.flip(inside[..., 1:], axis=2), axis=2), axis=2)
+    w = np.exp(-alpha * above)
+    return floor + (1.0 - floor) * w
 
 
 def load_meta(root, instance, view):
@@ -61,6 +75,14 @@ def main():
     ap.add_argument("--rescale_t", type=float, default=3.0)
     ap.add_argument("--mesh_points", type=int, default=10000)
     ap.add_argument("--emd_points", type=int, default=1024)
+    ap.add_argument("--consistency", action="store_true",
+                    help="Also run the P2 cross-view consistency-guided sampler "
+                         "(sample_multiview_consistency, all views jointly, same "
+                         "noise) and report consist_single / consist_median_K<all> "
+                         "rows alongside the unguided ones.")
+    ap.add_argument("--rho", type=float, default=0.2)
+    ap.add_argument("--band", type=float, default=0.15)
+    ap.add_argument("--guidance_skip", type=int, default=5)
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
@@ -103,7 +125,9 @@ def main():
     print(f"model {args.model_dir}/{args.ckpt}, steps={args.steps}")
 
     arms = ["single"] + [f"{m}_K{k}" for k in sorted(subsets) if k > 1
-                         for m in ("mean", "median", "vismean")]
+                         for m in ("mean", "median", "vishand", "hybrid")]
+    if args.consistency:
+        arms += ["consist_single", f"consist_median_K{len(views)}"]
     acc = {a: {} for a in arms + ["gt_floor"]}
 
     def push(arm, m):
@@ -144,6 +168,26 @@ def main():
             sdf_hand = trainer.ss_dec(pos["x0_hand"]).float()
             sdf_gt_ref = trainer.ss_dec(x_0[:1]).float()    # ref view GT decode
 
+        sdf_consist = None
+        if args.consistency:
+            coords, scales = [], []
+            for v in views:
+                c, sc = torch_warp_coords(metas[v], metas[ref])
+                coords.append(torch.from_numpy(np.ascontiguousarray(c)).float())
+                scales.append(sc)
+            coords = torch.stack(coords).cuda()
+            scales_t = torch.tensor(scales).float().cuda()
+            zc = sampler.sample_multiview_consistency(
+                model, noise.clone(), trainer.ss_dec, coords, scales_t,
+                cond=pos, neg_cond=neg,
+                steps=args.steps, rescale_t=args.rescale_t,
+                rho=args.rho, band=args.band, guidance_skip=args.guidance_skip,
+                cfg_strength=args.cfg_strength,
+                cfg_interval=tuple(args.cfg_interval),
+                verbose=False).samples
+            with torch.no_grad():
+                sdf_consist = trainer.ss_dec(zc).float()
+
         sdf_hand_ref = sdf_hand[:1]
         touch_ref = pos["touch"][:1]
 
@@ -151,8 +195,7 @@ def main():
         warped, warped_vis = {}, {}
         for bi, v in enumerate(views):
             pred_np = sdf_pred[bi, 0].cpu().numpy()
-            scene = np.minimum(pred_np, sdf_hand[bi, 0].cpu().numpy())
-            vis = visibility(scene)
+            vis = hand_visibility(sdf_hand[bi, 0].cpu().numpy())
             if v == ref:
                 warped[v], warped_vis[v] = pred_np, vis
             else:
@@ -160,6 +203,13 @@ def main():
                 warped_vis[v] = np.clip(warp_sdf(vis, metas[v], metas[ref], cval=0.0), 0.0, 1.0)
 
         fused = {"single": warped[ref]}
+        if sdf_consist is not None:
+            cw = []
+            for bi, v in enumerate(views):
+                cn = sdf_consist[bi, 0].cpu().numpy()
+                cw.append(cn if v == ref else warp_sdf(cn, metas[v], metas[ref]))
+            fused["consist_single"] = cw[0]
+            fused[f"consist_median_K{len(views)}"] = np.median(np.stack(cw), axis=0)
         for k, vs in subsets.items():
             if k == 1:
                 continue
@@ -168,9 +218,15 @@ def main():
             med = np.median(W, axis=0)
             fused[f"mean_K{k}"] = W.mean(axis=0)
             fused[f"median_K{k}"] = med
-            wsum = V.sum(axis=0)
-            vm = (W * V).sum(axis=0) / np.clip(wsum, 1e-6, None)
-            fused[f"vismean_K{k}"] = np.where(wsum >= 0.5, vm, med)
+            wmean = (W * V).sum(axis=0) / np.clip(V.sum(axis=0), 1e-6, None)
+            fused[f"vishand_K{k}"] = wmean
+            # Hybrid (user proposal 2026-08-24): trust the visibility-weighted
+            # mean where the views agree, fall back to the robust median where
+            # they disagree. Smooth gate on across-view std, tau = 1 voxel.
+            std = W.std(axis=0)
+            tau = 1.0 / 64.0
+            g = np.exp(-(std / tau) ** 2)
+            fused[f"hybrid_K{k}"] = g * wmean + (1.0 - g) * med
 
         # ---- metrics in the ref frame ----
         rng_mesh = np.random.default_rng(args.seed * 31337 + gi)

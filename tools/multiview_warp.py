@@ -113,3 +113,51 @@ if __name__ == "__main__":
             print(f"center={center} part={part}: IoU mean {np.mean(ious):.4f} min {np.min(ious):.4f} | band|diff| mean {np.mean(bd):.4f}")
             for r in res:
                 print(f"   {r['i']:>2}->{r['j']:<2} IoU {r['iou']:.4f} band|diff| {r['band_madiff']:.4f} (in_gt {r['inside_b']}, in_warp {r['inside_a']})")
+
+
+# ---------------------------------------------------------------------------
+# Torch port for in-sampler use (P2 consistency guidance): precompute, per view,
+# the grid_sample coordinates that pull that view's volume into the REF grid.
+# Validated numerically against warp_sdf (scipy) by torch_warp_selftest below.
+# ---------------------------------------------------------------------------
+
+def torch_warp_coords(meta_src, meta_ref, res=64):
+    """grid_sample coords (numpy [res,res,res,3], order z,y,x) mapping ref-grid
+    voxel centers into meta_src's grid, plus the SDF value scale s_ref/s_src."""
+    pts_ref = grid_points(res, center=True).reshape(-1, 3)
+    pts_src = canon_to_view(view_to_canon(pts_ref, meta_ref), meta_src)
+    # volume stored [x,y,z] as dims (D,H,W) => grid last dim must be (W=z,H=y,D=x)
+    coords = pts_src[:, ::-1].reshape(res, res, res, 3)
+    s_src = sim_from_meta(meta_src)[0]
+    s_ref = sim_from_meta(meta_ref)[0]
+    return coords, s_ref / s_src
+
+
+def torch_warp(vol, coords, scale, pad_value=1.0):
+    """vol [B,1,64,64,64] (dims x,y,z), coords torch [64,64,64,3] on same device.
+    Returns the volume resampled onto the ref grid, values scaled, out-of-range
+    filled with pad_value. Differentiable w.r.t. vol."""
+    import torch
+    import torch.nn.functional as tF
+    B = vol.shape[0]
+    g = coords[None].expand(B, -1, -1, -1, -1)
+    # pad with (pad_value/scale) so padded regions end up at pad_value after scaling
+    shifted = vol - pad_value / scale
+    out = tF.grid_sample(shifted, g, mode="bilinear",
+                         padding_mode="zeros", align_corners=False)
+    return (out + pad_value / scale) * scale
+
+
+def torch_warp_selftest(inst_dir, name, i, j, device="cpu", atol=0.02):
+    """Compare torch_warp vs warp_sdf on GT; returns (max_abs_diff, ok)."""
+    import torch
+    meta_i, sdf_i = load_view(inst_dir, name, i)
+    meta_j, _ = load_view(inst_dir, name, j)
+    ref = warp_sdf(sdf_i["object"], meta_i, meta_j)
+    coords, scale = torch_warp_coords(meta_i, meta_j)
+    v = torch.from_numpy(sdf_i["object"].copy()).float()[None, None].to(device)
+    c = torch.from_numpy(np.ascontiguousarray(coords)).float().to(device)
+    out = torch_warp(v, c, scale).cpu().numpy()[0, 0]
+    interior = np.abs(ref) < 0.9  # skip far-field pad differences
+    d = float(np.abs(out - ref)[interior].max())
+    return d, d < atol
