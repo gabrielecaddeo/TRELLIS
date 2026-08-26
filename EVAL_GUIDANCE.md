@@ -887,3 +887,13 @@ user-approved, to run after the current tests/trainings**. Recipe (agreed):
 - Budget: ~4-6 GPU-days total. Expected: beats post-hoc median at equal K
   (learned integration), upgrades the demo to "model integrates observations
   over the grasp".
+
+**616 startup verified (first log lines)**: all keys present, no NaN,
+distill_mse ~0.035 (no warm-start jump), visual_valid_frac 0.625. NOTE:
+presence_raw 6.6e-6 / carving_raw 9.3e-9 are TINY — A@81k already nearly
+satisfies both constraints under the (1−t)² weighting. Watch for a near-no-op
+outcome; if the triple comparison shows delta ≈ 0, the honest conclusions are
+(a) the visual prior is already absorbed by a well-trained student (consistent
+with §7.13's absorption law) and its value lies in EARLY training (test: add it
+to a from-scratch or B-continuation run) or as inference-time measurement
+guidance; consider λ 2→10 only with evidence, not preemptively.
