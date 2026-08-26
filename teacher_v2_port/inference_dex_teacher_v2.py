@@ -19,7 +19,10 @@ from skimage.measure import marching_cubes
 from trellis.pipelines import TrellisImageTo3DPipelineConditioned
 
 REPO = "/projects/gcaddeo/inference/TRELLIS"
-PIPELINE_DIR = f"{REPO}/teacher_v2_stage2"
+# DEX_PIPELINE_DIR overrides the pipeline dir (e.g. student_a_stage2 from
+# convert_teacher_v2.py --pipeline_dir). Unset -> teacher, identical to the
+# parity-tested runs.
+PIPELINE_DIR = os.environ.get("DEX_PIPELINE_DIR") or f"{REPO}/teacher_v2_stage2"
 DATA_ROOT = f"{REPO}/dex-dataset-total-total"
 OUT_ROOT = os.environ.get("DEX_OUT_ROOT") or f"{REPO}/meshes_results_marching_cubes_teacher_v2"
 # DEX_STEPS overrides the sparse-structure sampler's step count (pipeline json
