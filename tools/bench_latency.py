@@ -39,6 +39,10 @@ def main():
     ap.add_argument("--models", nargs="+", required=True,
                     help="name:dir:ckpt triplets, e.g. teacher:outputs/teacher_v2_stage2_physics:denoiser_ema0.9999_step0052000.pt")
     ap.add_argument("--steps", type=int, nargs="+", default=[25, 8, 4])
+    ap.add_argument("--batch_k", type=int, nargs="+", default=[1],
+                    help="Batch sizes to bench: K views in ONE forward (the "
+                         "multiview fusion deployment mode). K=1 keeps the "
+                         "legacy output keys; K>1 adds *_bK variants.")
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--autocast", choices=["bf16", "fp16"], default=None,
                     help="Wrap flow sampling + decode in torch.autocast with this "
@@ -77,17 +81,26 @@ def main():
                                   else torch.float16)) if args.autocast else contextlib.nullcontext)
 
     res = {"meta": {"reps": args.reps, "batch": 1, "steps": args.steps,
-                    "autocast": args.autocast,
+                    "batch_k": args.batch_k, "autocast": args.autocast,
                     "gpu": torch.cuda.get_device_name(0)}}
 
-    mean, std = cuda_time(lambda: trainer.get_inference_cond(**data), reps=args.reps)
-    res["cond_encode_ms"] = {"mean": mean, "std": std}
-    print(f"cond encode: {mean:.1f} +- {std:.1f} ms")
+    # Per-K conditioning: replicate the single sample K times along the batch
+    # dim (same shapes as multiview_fusion_eval's stacked K-view batch — the
+    # views differ in content, not layout, so latency is identical).
+    def rep(t, K):
+        return t if K == 1 else t.repeat(K, *([1] * (t.dim() - 1)))
 
-    cond_args = trainer.get_inference_cond(**data)
-    pos, neg = cond_args["cond"], cond_args["neg_cond"]
     sampler = samplers.FlowEulerGuidanceIntervalSampler(sigma_min=trainer.sigma_min)
-    noise = torch.randn_like(x_0)
+    conds, noises = {}, {}
+    for K in args.batch_k:
+        suf = "" if K == 1 else f"_b{K}"
+        data_K = {k: (rep(v, K) if torch.is_tensor(v) else v) for k, v in data.items()}
+        mean, std = cuda_time(lambda: trainer.get_inference_cond(**data_K), reps=args.reps)
+        res[f"cond_encode_ms{suf}"] = {"mean": mean, "std": std}
+        print(f"cond encode (K={K}): {mean:.1f} +- {std:.1f} ms")
+        cond_args = trainer.get_inference_cond(**data_K)
+        conds[K] = (cond_args["cond"], cond_args["neg_cond"])
+        noises[K] = torch.randn(K, *x_0.shape[1:], device=x_0.device, dtype=x_0.dtype)
 
     del dummy
     torch.cuda.empty_cache()
@@ -102,25 +115,32 @@ def main():
         n_params = sum(p.numel() for p in model.parameters())
         res[name] = {"ckpt": ckpt, "params_M": n_params / 1e6}
         for steps in args.steps:
-            def run():
-                with torch.no_grad(), ac():
-                    out = sampler.sample(model, noise, cond=pos, neg_cond=neg,
-                                         steps=steps, rescale_t=3.0, cfg_strength=5.0,
-                                         cfg_interval=(0.5, 1.0), verbose=False)
-                latent_holder["z"] = out.samples
-            mean, std = cuda_time(run, reps=args.reps)
-            res[name][f"flow_{steps}steps_ms"] = {"mean": mean, "std": std}
-            print(f"{name} ({n_params/1e6:.0f}M) flow {steps:>2} steps: {mean:7.1f} +- {std:.1f} ms")
+            for K in args.batch_k:
+                suf = "" if K == 1 else f"_b{K}"
+                pos, neg = conds[K]
+                noise = noises[K]
+                def run():
+                    with torch.no_grad(), ac():
+                        out = sampler.sample(model, noise, cond=pos, neg_cond=neg,
+                                             steps=steps, rescale_t=3.0, cfg_strength=5.0,
+                                             cfg_interval=(0.5, 1.0), verbose=False)
+                    latent_holder[K] = out.samples
+                mean, std = cuda_time(run, reps=args.reps)
+                res[name][f"flow_{steps}steps_ms{suf}"] = {"mean": mean, "std": std}
+                print(f"{name} ({n_params/1e6:.0f}M) flow {steps:>2} steps K={K}: {mean:7.1f} +- {std:.1f} ms")
         del model
         torch.cuda.empty_cache()
 
-    z = latent_holder["z"]
-    def dec():
-        with torch.no_grad(), ac():
-            trainer.ss_dec(z)
-    mean, std = cuda_time(dec, reps=args.reps)
-    res["decode_ms"] = {"mean": mean, "std": std}
-    print(f"ss_dec decode: {mean:.1f} +- {std:.1f} ms")
+    for K in args.batch_k:
+        suf = "" if K == 1 else f"_b{K}"
+        z = latent_holder[K]
+        def dec():
+            with torch.no_grad(), ac():
+                trainer.ss_dec(z)
+        mean, std = cuda_time(dec, reps=args.reps)
+        res[f"decode_ms{suf}"] = {"mean": mean, "std": std}
+        print(f"ss_dec decode (K={K}): {mean:.1f} +- {std:.1f} ms")
+    z = latent_holder[args.batch_k[0]][:1]
 
     with torch.no_grad():
         sdf = trainer.ss_dec(z).float()[0, 0].cpu().numpy()

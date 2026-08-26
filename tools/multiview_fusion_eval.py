@@ -101,6 +101,16 @@ def main():
         assert vs[0] == ref and all(v in views for v in vs), (k, vs)
         subsets[int(k)] = vs
 
+    if args.ckpt == "latest_ema":
+        # Same resolution as ab_eval_guidance. Only safe on single-purpose
+        # student dirs whose training has FINISHED — never the teacher dir
+        # (it holds unevaluated post-freeze leftovers).
+        import glob
+        cands = sorted(glob.glob(os.path.join(args.model_dir, "ckpts", "denoiser_ema*.pt")))
+        assert cands, f"no EMA ckpts in {args.model_dir}/ckpts"
+        args.ckpt = os.path.basename(cands[-1])
+        print(f"latest_ema resolved to {args.ckpt}")
+
     cfg = edict(json.load(open(os.path.join(args.model_dir, "config.json"))))
     dataset = getattr(datasets, cfg.dataset.name)(args.data_dir, **cfg.dataset.args)
     dataset.inference = True

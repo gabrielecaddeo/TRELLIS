@@ -87,10 +87,15 @@ voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
    (§7.17, thesis passes); visual loss validated+implemented+launched (§7.18).
 2. 2026-08-27/28: read visual-ft (616) vs A-extension (610/612 → ~114k) vs
    B-extension (611/613 → ~64k) — triple comparison, paired a/b + fusion.
-3. Full-set (n=351) fusion @8 for the final chosen ckpt (599 = A@81k full-set,
-   running; redo only if a later ckpt replaces A@81k).
-4. P3: batch-K bf16 latency for the chosen student; assemble the final
-   capacity × steps × views frontier table; name the operating point.
+3. DONE 2026-08-26 (job 599): A@81k full-set (n=351) fusion @8 — §7.17 thesis
+   holds at scale on IoU/F@0.02/NC/contact; CD ties, EMD worse (honest caveat
+   recorded in §7.17). Redo only if a later ckpt replaces A@81k.
+4. P3: batch-K bf16 latency — bench_latency.py EXTENDED with --batch_k
+   (K views in one forward, per-K cond encode/flow/decode); job 617 queued
+   (afterany:616, runs Thu eve on H200): teacher + A(8×2) + B(8×4) archs,
+   steps 25/8/4 × K 1/2/4/8 bf16 → latency_h200_batchK_bf16.json. Latency is
+   arch-only, so valid whatever ckpt the triple comparison picks. Then the
+   frontier table + operating point.
 5. Real-capture confirmation: chosen student dex rows (convert via the
    parity-tested port teacher_v2_port/convert_teacher_v2.py — NOTE it must be
    generalized for the student arch; ICP canonical flags) + rig latency demo

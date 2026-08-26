@@ -25,38 +25,62 @@ State as of 2026-08-26 ~evening:
 - **P4 recursive student APPROVED (§7.19)** — run AFTER current tests/trainings.
   Interim streaming demo = ring-buffer median (no training needed).
 
-IN FLIGHT (check `sacct -j 599,610,611,612,613,616` FIRST):
-- 599 = A@81k FULL-SET fusion (n=351 @8, L40S) → `outputs/diagnostics/
-  mv_fusion_studentA81k_s8_full.json` — confirms §7.17 at scale.
-- 610→612 = student-A extension → ~114k (`outputs/distill_teacherv2/`),
-  ends ~2026-08-28 morning. 611→613 = student-B → ~64k
-  (`outputs/distill_s8mlp4_copyinit/`), same. Graceful wall = exit 138/FAILED.
-- 616 = VISUAL-LOSS fine-tune of A@81k, 1×24h → `outputs/distill_visual_ft/`.
-  On first read verify log.txt: presence_raw/carving_raw/visual_valid_frac
-  present, no NaN, distill_mse stays ≈0.049 (warm start must not jump), and
-  presence_raw/carving_raw magnitudes sane (order 1e-2/1e-4, not 10×).
+DONE 2026-08-26 evening session:
+- 599 COMPLETED → §7.17 full-set table appended: fused A@81k beats teacher
+  single on IoU/F@0.02/NC/contact at n=351, but CD TIES (0.0597 vs 0.0586) and
+  EMD is worse — the n=48 across-the-board win was subset luck on distance
+  metrics. Paper phrasing recorded in §7.17.
+- 616 early-log checklist PASSED (§7.19 note): 0 NaN @100 steps, distill_mse
+  0.048–0.050 (no warm-start jump), valid_frac 0.94–0.97; presence_raw ~2e-4 /
+  carving_raw ~1e-6 = tiny (near-no-op risk stands). 610 resumed A@81000,
+  611 resumed B@32000 clean. NOTE: extension configs log with i_log=500
+  (buffered flush every ~40 min) — a silent log.txt is NORMAL for them.
+- bench_latency.py EXTENDED with --batch_k (per-K cond encode / flow / decode,
+  K views in one forward, pattern of the fusion eval's stacked batch).
+- multiview_fusion_eval.py now accepts --ckpt latest_ema (records resolved
+  name; only for FINISHED single-purpose student dirs, never the teacher dir).
+- Inference repo (NOT committed there yet — see rules): convert_teacher_v2.py
+  generalized (--train_config/--pipeline_dir/--name assembles a student
+  pipeline dir, decoders symlinked, use_checkpoint off); inference_dex uses
+  DEX_PIPELINE_DIR env. New tools/dex_student.sbatch +
+  tools/dex_eval_cm_student.sbatch (convert→infer→canonical-ICP, 486→487
+  pattern, tags e.g. a81k).
+
+IN FLIGHT / PRE-QUEUED (check `squeue -u gcaddeo` + `sacct` FIRST):
+- 610→612 = student-A extension → ~114k (`outputs/distill_teacherv2/`,
+  segment 7/7 = final). 611→613 = student-B → ~64k
+  (`outputs/distill_s8mlp4_copyinit/`, segment 4/4 = final). Graceful wall =
+  exit 138/FAILED. 616 = visual-ft, ends Thu ~17:00.
+- Pre-queued on dependencies (all latest_ema, L40S evals):
+  - after 616: 618/619/620 = ab_vft 25/8/4, 621 = mv_vft_8, and 617 =
+    batch-K bf16 latency bench (H200, teacher+A-arch+B-arch, steps 25/8/4 ×
+    K 1/2/4/8 → `latency_h200_batchK_bf16.json`).
+  - after 612: 622/623/624 = ab_aext 25/8/4, 625 = mv_aext_8.
+  - after 613: 626 = ab_bext_8, 627 = mv_bext_8. (B's 25/4-step a/b NOT yet
+    queued — l40s MaxSubmitPU=10 was full; submit Thu once vft suite drains:
+    same pattern, `--teacher_dir outputs/distill_s8mlp4_copyinit`.)
+  Outputs: `ab_guidance_student{Avft,Aext,Bext}_ds_steps*.json`,
+  `mv_fusion_student{Avft,Aext,Bext}_s8.json`.
 
 Tasks, in order:
-1. Read 599 → append full-set A@81k fusion numbers to §7.17.
-2. When 616 ends (~Thu am): paired a/b (25/8/4, 3 arms, `--data_seed 1337`) +
-   48-group fusion (`tools/multiview_fusion_eval.sbatch`, L40S) on its final
-   EMA. When 612/613 end (~Fri): same for A@~114k and B@~64k.
-3. **TRIPLE COMPARISON** → §7.20: A@81k vs A+visual-ft vs A@114k (and B@64k):
-   separates visual-loss gain from more-training gain. Prediction: carving cuts
-   CD/EMD outliers. Re-pick the final ckpt if any beats A@81k; rerun full-set
-   fusion for the winner only (pattern of job 599).
-4. P3 frontier assembly: extend tools/bench_latency.py with batch-K (K views in
-   ONE forward, bf16 autocast, K∈{1,2,4,8}) on H200 → the claim "8-view student
-   batch < 1 teacher forward" needs this number. Then the final capacity ×
-   steps × views Pareto table; name the deployment operating point.
-5. Dex rows for the final student (generalize inference-repo
-   teacher_v2_port/convert_teacher_v2.py for the student arch first; then the
-   486→487 chain pattern, canonical ICP flags).
-6. **P4 build (user-approved)**: follow the §7.19 recipe exactly — precompute
+1. **TRIPLE COMPARISON** → new §7.20: A@81k (§7.16/§7.17) vs A+visual-ft
+   (Avft) vs A@~114k (Aext), plus Bext: separates visual-loss gain from
+   more-training gain. Prediction: carving cuts CD/EMD outliers (§7.17's
+   full-set CD/EMD tie is exactly the target). Watch the near-no-op risk
+   (§7.19): if Avft ≈ A@81k, record the absorption interpretation honestly.
+   Re-pick the final ckpt if any beats A@81k; rerun full-set fusion for the
+   winner only (pattern of job 599: mv_fusion sbatch, n=351, L40S, ~1h45).
+2. P3 frontier assembly once 617 lands: verify "8-view student batch < 1
+   teacher forward" from `latency_h200_batchK_bf16.json`; assemble the final
+   capacity × steps × views Pareto table; name the deployment operating point.
+3. Dex rows for the FINAL student: `sbatch tools/dex_student.sbatch
+   <train_dir> <ckpt> <tag> 8` then `sbatch --dependency=afterany:<id>
+   tools/dex_eval_cm_student.sbatch <tag> 8` (25 too if wanted for the table).
+4. **P4 build (user-approved)**: follow the §7.19 recipe exactly — precompute
    pass (frozen best student over training views, subsampled), zero-init prior
    channel, warm-start, prior dropout 30%, curriculum. Ask the user before the
    precompute+training launch (multi-day GPU).
-7. Keep EVAL_GUIDANCE §7 / ICRA_PLAN / NEXT_SESSION_PROMPT / memory updated
+5. Keep EVAL_GUIDANCE §7 / ICRA_PLAN / NEXT_SESSION_PROMPT / memory updated
    after each result; commit at phase boundaries.
 
 Open user decisions: rig access timeline (real-time demo = ICRA centerpiece;

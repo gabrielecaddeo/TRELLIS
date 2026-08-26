@@ -822,6 +822,31 @@ the single-view teacher on every metric — at ~⅓ the per-view latency, with K
 views batched in one forward. (Teacher+fusion remains the offline quality
 ceiling.) Full-set n=351 version = job 599, running.
 
+**Full-set n=351 confirmation (job 599, COMPLETED 2026-08-26, 1h43 L40S,
+`mv_fusion_studentA81k_s8_full.json`) — thesis holds with one honest caveat.**
+Same harness/groups as the teacher full-set table (§7.13), paired:
+
+| @8 steps, n=351 | contact −floor | hit1v | IoU | CD | NC | F@0.02 | EMD |
+|---|---|---|---|---|---|---|---|
+| teacher single (§7.13) | 2.16e-3 | — | 0.605 | 0.0586 | 0.849 | 0.568 | 0.0783 |
+| A@81k single | 7.00e-4 | 0.631 | 0.543 | 0.0736 | 0.820 | 0.487 | 0.0963 |
+| **A@81k median_K8** | **−2.80e-3** | 0.742 | **0.644** | 0.0597 | **0.864** | **0.609** | 0.0900 |
+| teacher median_K8 (§7.13) | −2.46e-3 | — | 0.716 | 0.0427 | 0.894 | 0.716 | 0.0710 |
+
+At scale the fused student beats the single-view teacher on **IoU (+0.039),
+F@0.02 (+0.041), NC (+0.015), and physics (contact below the decoder floor vs
++2.2e-3 excess)** — but **CD ties (0.0597 vs 0.0586, +1.9%) and EMD is worse
+(0.0900 vs 0.0783)**; the n=48 subset's across-the-board win (CD 0.0466 vs
+0.0501) was subset luck on the distance metrics. Paper phrasing: fused student
+matches or beats the teacher on all metrics except EMD, at ~⅓ latency.
+Interestingly A@81k single-view contact excess (7.0e-4) is 3× BELOW the
+teacher's (2.16e-3) on the full set too — the student-beats-teacher physics
+result (§7.16) reproduces at n=351. Fusion-arm ladder also reproduces:
+mean_K8 0.614 < vishand_K8 0.624 < hybrid_K8 0.645 ≈ median_K8 0.644 (IoU).
+If the §7.20 triple comparison re-picks the ckpt, rerun this (pattern of 599)
+for the winner; the CD/EMD tail is exactly what the §7.18 carving loss and P4
+learned integration are predicted to cut.
+
 ### 7.18 Visual (silhouette) loss: idea, validation, implementation, fine-tune (2026-08-26)
 
 **User proposal**: the conditioning image maps to the grid such that each pixel
@@ -897,3 +922,12 @@ outcome; if the triple comparison shows delta ≈ 0, the honest conclusions are
 with §7.13's absorption law) and its value lies in EARLY training (test: add it
 to a from-scratch or B-continuation run) or as inference-time measurement
 guidance; consider λ 2→10 only with evidence, not preemptively.
+
+**616 @100 steps (verified 2026-08-26 ~17:40)**: checklist PASSES — all keys
+present, 0 NaN, distill_mse mean 0.048–0.050 (== pre-FT 0.049, no warm-start
+jump), visual_valid_frac 0.94–0.97. presence_raw mean ~2e-4 (max 8.9e-4),
+carving_raw ~1e-6 — well below the 1e-2/1e-4 order the checklist allowed for,
+i.e. no mis-calibration blowup, but confirming the near-no-op risk above: the
+hinges are active (nonzero, fluctuating) yet tiny vs distill_mse 0.05. The
+extension segments also verified: 610 resumed A from step 81000, 611 resumed B
+from 32000, both "Starting training..." clean (jobs started 17:03).
