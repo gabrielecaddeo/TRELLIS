@@ -82,7 +82,9 @@ Tasks, in order:
    only input_layer_prior.*, step-0 distill_mse ≈0.05, no NaN). If 628/629
    pass AND the §7.20 winner is known: update INIT_CKPT in
    tools/train_p4_recursive.sbatch + the precompute sbatch's --ckpt if it
-   changed, then **ASK THE USER** before launching the real chain
+   changed, then **ASK THE USER** (confirmed 2026-08-26: report the smoke +
+   triple-comparison results FIRST, launch only on their explicit go — do NOT
+   launch autonomously) before launching the real chain
    (`sbatch tools/train_p4_recursive.sbatch` stage 1 ~2×24h) and the stage-2
    precompute (`tools/precompute_student_recons.sbatch 0 2` + `1 2`,
    multi-GPU-day). Stage 2 resumes the chain with CONFIG_SUFFIX=_stage2.
