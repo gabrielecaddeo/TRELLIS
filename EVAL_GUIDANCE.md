@@ -863,3 +863,27 @@ floating-geometry outliers (CD/EMD tails), partially replicating fusion's
 benefit at single-view latency. If confirmed, the mask terms also become
 measurement-guidance candidates at inference (masks are observations — the
 absorption law §7.13 says measurement terms keep helping).
+
+### 7.19 P4 recursive student: APPROVED (user decision 2026-08-26), queued after current tests
+
+The streaming demo has two tiers: (i) ring-buffer median — NO training, per
+frame: student forward (0.52 s) → warp to canonical → per-voxel median over the
+last K SDFs (~1 MB each); statistically correct per §7.13 (fuse INDEPENDENT
+reconstructions; never couple during generation). (ii) **P4 learned recursion —
+user-approved, to run after the current tests/trainings**. Recipe (agreed):
+- Architecture: warped prior reconstruction → frozen VAE encoder → 16³×8 latent
+  → NEW zero-init input layer added to the token embedding (the input_layer_x0h
+  pattern). Zero-init ⇒ step-0 behavior == student A exactly; warm-start from
+  the best student ckpt. NO base-model re-pretraining (precedent: hand
+  conditioning itself was added to the vision-pretrained base the same way).
+- Data: simulated streaming from the 24-view grasps — prior = warped fusion of
+  OTHER views of the same grasp; curriculum corrupted-GT → precomputed frozen-
+  student reconstructions (one-time offline pass, ~2-3 GPU-days, subsample views
+  to halve); prior dropout ~30% (preserves single-view mode; anti-copy);
+  pose-jitter on the warp for rig robustness. Copy-shortcut is further blocked
+  by construction: the prior comes from other views, wrong exactly where the
+  current image is informative.
+- Losses unchanged (distill + physics + visual if §7.18 validates).
+- Budget: ~4-6 GPU-days total. Expected: beats post-hoc median at equal K
+  (learned integration), upgrades the demo to "model integrates observations
+  over the grasp".

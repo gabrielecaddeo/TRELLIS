@@ -53,9 +53,13 @@ voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
   (extend bench_latency: K views in one batched forward, bf16), the final
   capacity × steps × views Pareto table on the CHOSEN student, and the
   deployment operating point. bf16 quality parity already verified (§7.13).
-- **P4 (stretch, decision pending with user)** — recursive fusion distilled into
-  the student (warped prior as conditioning channel); the learned 3D-CNN fusion
-  aggregator is a cheaper sibling that would also subsume the fusion-arm branch.
+- **P4 — recursive student: APPROVED by the user (2026-08-26), scheduled AFTER
+  the current tests/trainings finish.** Full recipe in EVAL_GUIDANCE.md §7.19:
+  zero-init prior-latent input channel (input_layer_x0h pattern), warm-start
+  from the best student, simulated-streaming data from the 24-view grasps
+  (curriculum corrupted-GT → precomputed frozen-student reconstructions, prior
+  dropout 30%, pose jitter), losses unchanged, ~4-6 GPU-days, NO base
+  re-pretraining. Interim rig demo: ring-buffer median streaming (no training).
 - **P5 — visual (silhouette) loss (user idea, 2026-08-26): VALIDATED +
   fine-tune RUNNING** (§7.18): mask↔column correspondence pixel-grade for
   visible objects; presence/carving hinges implemented in the distillation
@@ -96,8 +100,7 @@ voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
 ## Open questions for the user
 - Rig access / camera setup timeline (the latency demo on live captures is the
   centerpiece for ICRA vs workshop).
-- P4 in or out of scope for this deadline.
-- Extend the 8×2 student beyond ~82k if the paired a/b still shows slope?
+- (P4: DECIDED — in scope, after current tests/trainings; see §7.19.)
 
 ## Hard rules (unchanged)
 - Mesh evals ALWAYS use ICP with the canonical flag set (memory trellis-eval-icp).
