@@ -1,0 +1,113 @@
+{
+    "models": {
+        "denoiser": {
+            "name": "SparseStructureFlowModelConditioned",
+            "args": {
+                "resolution": 16,
+                "in_channels": 8,
+                "out_channels": 8,
+                "model_channels": 1024,
+                "cond_channels": 1024,
+                "num_blocks": 8,
+                "num_heads": 16,
+                "mlp_ratio": 2,
+                "patch_size": 1,
+                "pe_mode": "ape",
+                "qk_rms_norm": true,
+                "use_fp16": false,
+                "use_touch": true,
+                "use_encoding_hand": true,
+                "use_weighted_attention": true,
+                "use_checkpoint": true,
+                "use_prior": true
+            }
+        }
+    },
+    "dataset": {
+        "name": "ImageConditionedSparseStructureLatentSDFConditionedPrior",
+        "args": {
+            "latent_model": "vae_final_all_resume_2_0300000",
+            "min_aesthetic_score": 4.5,
+            "image_size": 518,
+            "pretrained_ss_dec": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16",
+            "ss_dec_path": "/projects/gcaddeo/train_flow/TRELLIS/outputs/vae_final_all_resume_2",
+            "ss_dec_ckpt": "step0300000",
+            "prior_source": "gt_corrupt",
+            "prior_student_dir": null,
+            "prior_k_max": 7,
+            "prior_dropout": 0.3,
+            "prior_jitter_rot_deg": 3.0,
+            "prior_jitter_trans": 0.02,
+            "prior_jitter_scale": 0.03,
+            "prior_corrupt_offset": 0.01,
+            "prior_corrupt_noise": 0.03,
+            "prior_corrupt_blob_p": 0.3
+        }
+    },
+    "trainer": {
+        "name": "ImageConditionedFlowMatchingCFGDistillationRecursiveTrainerConditioned",
+        "args": {
+            "max_steps": 1000000,
+            "batch_size_per_gpu": 8,
+            "batch_split": 1,
+            "optimizer": {
+                "name": "AdamW",
+                "args": {
+                    "lr": 5e-05,
+                    "weight_decay": 0.0
+                }
+            },
+            "ema_rate": [
+                0.9999
+            ],
+            "fp16_mode": "inflat_all",
+            "fp16_scale_growth": 0.001,
+            "grad_clip": {
+                "name": "AdaptiveGradClipper",
+                "args": {
+                    "max_norm": 1.0,
+                    "clip_percentile": 95
+                }
+            },
+            "i_log": 100,
+            "i_sample": 2000,
+            "i_save": 1000,
+            "p_uncond": 0.1,
+            "t_schedule": {
+                "name": "logitNormal",
+                "args": {
+                    "mean": 1.0,
+                    "std": 1.0
+                }
+            },
+            "sigma_min": 1e-05,
+            "image_cond_model": "dinov2_vitl14_reg",
+            "ss_dec_path": "/projects/gcaddeo/train_flow/TRELLIS/outputs/vae_final_all_resume_2",
+            "ss_dec_ckpt": "step0300000",
+            "lambda_non_interpenetration_start": 30,
+            "lambda_non_interpenetration_max": 30,
+            "lambda_non_interpenetration_warmup": 1,
+            "lambda_contact": 1.0,
+            "use_encoding_hand": true,
+            "use_touch": true,
+            "teacher_config_path": "/projects/gcaddeo/train_flow_conditioned/TRELLIS/outputs/teacher_v2_stage2_physics/config.json",
+            "teacher_ckpt_path": "/projects/gcaddeo/train_flow_conditioned/TRELLIS/outputs/teacher_v2_stage2_physics/denoiser_teacher_v2_FROZEN.pt",
+            "teacher_model_key": "denoiser",
+            "teacher_strict_load": true,
+            "target_loss_weight": 0.25,
+            "distill_loss_weight": 1.0,
+            "use_physics_losses": true,
+            "ni_relative": true,
+            "contact_relative": true,
+            "contact_mode": "mask",
+            "ni_margin": 0.015625,
+            "physics_time_power": 2.0,
+            "use_visual_losses": false,
+            "lambda_presence": 0.0,
+            "lambda_carving": 0.0,
+            "visual_min_mask_px": 30,
+            "use_prior_latent": true,
+            "ss_enc_ckpt": "step0300000"
+        }
+    }
+}

@@ -18,6 +18,7 @@ __attributes = {
     'ImageConditionedSparseStructureLatent': 'sparse_structure_latent',
     'ImageConditionedSparseStructureLatentSDF': 'sparse_structure_latent',
     'ImageConditionedSparseStructureLatentSDFConditioned': 'sparse_structure_latent',
+    'ImageConditionedSparseStructureLatentSDFConditionedPrior': 'sparse_structure_latent',
 
     'SLat': 'structured_latent',
     'SLatVisMixin': 'structured_latent',

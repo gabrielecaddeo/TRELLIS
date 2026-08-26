@@ -76,10 +76,16 @@ Tasks, in order:
 3. Dex rows for the FINAL student: `sbatch tools/dex_student.sbatch
    <train_dir> <ckpt> <tag> 8` then `sbatch --dependency=afterany:<id>
    tools/dex_eval_cm_student.sbatch <tag> 8` (25 too if wanted for the table).
-4. **P4 build (user-approved)**: follow the §7.19 recipe exactly — precompute
-   pass (frozen best student over training views, subsampled), zero-init prior
-   channel, warm-start, prior dropout 30%, curriculum. Ask the user before the
-   precompute+training launch (multi-day GPU).
+4. **P4 build: CODE DONE (see §7.19 build note), launch pending.** Queued:
+   628 = CPU self-test (no-op/gating/warp-parity/dataset), 629 = GPU smoke
+   (400 steps, afterany:616; verify per its header comments: missing keys ==
+   only input_layer_prior.*, step-0 distill_mse ≈0.05, no NaN). If 628/629
+   pass AND the §7.20 winner is known: update INIT_CKPT in
+   tools/train_p4_recursive.sbatch + the precompute sbatch's --ckpt if it
+   changed, then **ASK THE USER** before launching the real chain
+   (`sbatch tools/train_p4_recursive.sbatch` stage 1 ~2×24h) and the stage-2
+   precompute (`tools/precompute_student_recons.sbatch 0 2` + `1 2`,
+   multi-GPU-day). Stage 2 resumes the chain with CONFIG_SUFFIX=_stage2.
 5. Keep EVAL_GUIDANCE §7 / ICRA_PLAN / NEXT_SESSION_PROMPT / memory updated
    after each result; commit at phase boundaries.
 

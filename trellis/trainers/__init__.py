@@ -20,6 +20,7 @@ __attributes = {
     'ImageConditionedFlowMatchingCFGTrainer': 'flow_matching.flow_matching',
     'ImageConditionedFlowMatchingCFGTrainerConditioned': 'flow_matching.flow_matching',
     'ImageConditionedFlowMatchingCFGDistillationTrainerConditioned': 'flow_matching.distillation',
+    'ImageConditionedFlowMatchingCFGDistillationRecursiveTrainerConditioned': 'flow_matching.distillation_recursive',
     
     'SparseFlowMatchingTrainer': 'flow_matching.sparse_flow_matching',
     'SparseFlowMatchingCFGTrainer': 'flow_matching.sparse_flow_matching',

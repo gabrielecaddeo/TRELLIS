@@ -923,6 +923,24 @@ with §7.13's absorption law) and its value lies in EARLY training (test: add it
 to a from-scratch or B-continuation run) or as inference-time measurement
 guidance; consider λ 2→10 only with evidence, not preemptively.
 
+**P4 BUILD DONE (2026-08-26 evening session) — not yet launched.** Code:
+model `use_prior` + zero-init `input_layer_prior` (added to the noisy-latent
+tokens; exact no-op at init, per-sample `prior_keep` gate); dataset
+`ImageConditionedSparseStructureLatentSDFConditionedPrior` (prior = median of
+warped OTHER-view SDFs; gt_corrupt curriculum stage with offset/smooth-noise/
+blob-deletion corruption, pose jitter, 30% dropout; stage 2 reads
+`outputs/p4_prior_recons`); trainer `...DistillationRecursiveTrainerConditioned`
+(frozen ss_enc encodes the prior SDF → 16³×8 latent; CFG-dropped samples lose
+the prior too — x0_hand-zero mask, same as physics gating); warp helpers
+duplicated in `trellis/utils/mv_warp_np.py` (verbatim, keep in sync). Configs:
+`..._p4_recursive{,_smoke,_stage2}.json` (visual losses OFF — keeps the P4
+delta = prior channel only). Launchers: `tools/train_p4_recursive.sbatch`
+(chaining, warm-start A@81k — update INIT_CKPT if §7.20 re-picks),
+`tools/train_p4_recursive_smoke.sbatch` (job 629, queued afterany:616),
+`tools/precompute_student_recons.{py,sbatch}` (stage-2 pass, sharded,
+resumable — NEEDS USER APPROVAL). CPU self-test = tools/p4_cpu_selftest.py
+(job 628): no-op/gating/warp-parity/dataset-stats.
+
 **616 @100 steps (verified 2026-08-26 ~17:40)**: checklist PASSES — all keys
 present, 0 NaN, distill_mse mean 0.048–0.050 (== pre-FT 0.049, no warm-start
 jump), visual_valid_frac 0.94–0.97. presence_raw mean ~2e-4 (max 8.9e-4),

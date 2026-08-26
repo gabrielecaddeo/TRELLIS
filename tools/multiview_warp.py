@@ -11,6 +11,10 @@ by the appropriate scale ratio (exact for true SDFs).
 Conventions from meta['grid']: origin [-1,-1,-1], voxel 2/64, axes i->x,j->y,k->z,
 negative inside. Sample positions are validated (voxel-center vs corner) by
 `validate` below rather than assumed.
+
+NOTE: sim_from_meta/view_to_canon/canon_to_view/grid_points/warp_sdf are
+duplicated in trellis/utils/mv_warp_np.py for dataset-side use (P4 recursive
+student) — keep the two copies in sync.
 """
 import json
 import os
