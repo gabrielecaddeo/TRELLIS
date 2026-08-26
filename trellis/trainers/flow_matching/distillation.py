@@ -55,6 +55,11 @@ class ImageConditionedFlowMatchingCFGDistillationTrainerConditioned(
         distill_loss_weight: float = 1.0,
         target_loss_weight: float = 0.25,
         use_physics_losses: bool = True,
+        use_visual_losses: bool = False,
+        lambda_presence: float = 0.0,
+        lambda_carving: float = 0.0,
+        visual_min_mask_px: int = 30,
+        visual_presence_margin: float = 0.015625,
         **kwargs,
     ):
         self.teacher_config_path = teacher_config_path
@@ -64,6 +69,11 @@ class ImageConditionedFlowMatchingCFGDistillationTrainerConditioned(
         self.distill_loss_weight = distill_loss_weight
         self.target_loss_weight = target_loss_weight
         self.use_physics_losses = use_physics_losses
+        self.use_visual_losses = use_visual_losses
+        self.lambda_presence = lambda_presence
+        self.lambda_carving = lambda_carving
+        self.visual_min_mask_px = visual_min_mask_px
+        self.visual_presence_margin = visual_presence_margin
         self.teacher_denoiser = None
 
         super().__init__(*args, **kwargs)
@@ -217,6 +227,86 @@ class ImageConditionedFlowMatchingCFGDistillationTrainerConditioned(
 
         return terms
 
+    def _add_visual_losses(self, terms, pred, x_t, t, x_0, mask_obj, mask_hand, kept):
+        """Silhouette losses (user proposal 2026-08-26; validated in
+        tools/validate_mask_column_correspondence.py). Grid view axis is -z, so
+        each mask pixel corresponds to a voxel column along z after the
+        orientation map found by validation (mask_grid[x,y] = mask[63-y, x]).
+        Per-sample 2-parameter calibration (area-ratio scale, centroid shift)
+        against the GT-SDF z-projection absorbs the collage's aspect-fit and
+        perspective wobble (presence violations 10.5% -> 2.0% measured).
+        Presence: ERODED calibrated object mask (minus hand) -> soft-min SDF
+        along the column must be < 0. Carving: outside the DILATED
+        (object OR hand) mask the column is provably empty -> penalize sdf < 0.
+        Views with a tiny visible object (< visual_min_mask_px at 64^2) get
+        zero weight - their silhouette carries no signal."""
+        B = x_0.shape[0]
+        w = (1.0 - t).clamp(0.0, 1.0).pow(self.physics_time_power) * kept   # [B]
+
+        x0_pred, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=pred)
+        sdf_obj = self.ss_dec(x0_pred).float().squeeze(1)                    # [B,64,64,64] (x,y,z)
+        with torch.no_grad():
+            sdf_gt = self.ss_dec(x_0).float().squeeze(1)
+            proj_gt = (sdf_gt < 0).any(dim=3).float()                        # [B,64,64] (x,y)
+
+            def to_grid(m):                                                  # [B,H,W] image -> [B,64,64] grid (x,y)
+                m = F.interpolate(m.unsqueeze(1).float(), size=(64, 64),
+                                  mode="bilinear", align_corners=False)
+                return m.transpose(2, 3).flip(3).squeeze(1)
+
+            m_obj, m_hand = to_grid(mask_obj), to_grid(mask_hand)
+
+            # per-sample similarity calibration: mask -> GT projection
+            xs = torch.linspace(-1, 1, 64, device=m_obj.device)
+            gy, gx = torch.meshgrid(xs, xs, indexing="ij")
+            def moments(m):
+                a = m.sum(dim=(1, 2)).clamp_min(1e-6)
+                cx = (m * gy[None]).sum(dim=(1, 2)) / a                      # dim0 coord
+                cy = (m * gx[None]).sum(dim=(1, 2)) / a                      # dim1 coord
+                return a, cx, cy
+            a_p, cx_p, cy_p = moments(proj_gt)
+            a_m, cx_m, cy_m = moments((m_obj > 0.5).float())
+            s_cal = (a_p / a_m).sqrt().clamp(0.7, 1.4)
+            # affine_grid theta maps OUTPUT coords -> INPUT sampling coords:
+            # sample mask at (out - c_p)/s + c_m
+            theta = torch.zeros(B, 2, 3, device=m_obj.device)
+            theta[:, 0, 0] = 1.0 / s_cal
+            theta[:, 1, 1] = 1.0 / s_cal
+            theta[:, 0, 2] = cy_m - cy_p / s_cal
+            theta[:, 1, 2] = cx_m - cx_p / s_cal
+            grid = F.affine_grid(theta, (B, 1, 64, 64), align_corners=False)
+            def cal(m):
+                return F.grid_sample(m.unsqueeze(1), grid, mode="bilinear",
+                                     padding_mode="zeros", align_corners=False).squeeze(1)
+            m_obj_c, m_hand_c = cal(m_obj), cal(m_hand)
+
+            pool = lambda m, k: F.max_pool2d(m.unsqueeze(1), k, 1, k // 2).squeeze(1)
+            m_obj_er = 1.0 - pool(1.0 - m_obj_c, 3)                          # erode 1px
+            union_dil = pool(torch.maximum(m_obj_c, m_hand_c), 5)            # dilate 2px
+            presence_px = ((m_obj_er > 0.5) & (m_hand_c < 0.3)).float()      # [B,64,64]
+            empty_px = (union_dil < 0.2).float()
+            valid = (((m_obj > 0.5).float().sum(dim=(1, 2)) >= self.visual_min_mask_px)
+                     .float())                                               # [B]
+
+        tau = 50.0
+        softmin = -torch.logsumexp(-sdf_obj * tau, dim=3) / tau              # [B,64,64]
+        pres_ps = (F.relu(softmin + self.visual_presence_margin) * presence_px
+                   ).sum(dim=(1, 2)) / presence_px.sum(dim=(1, 2)).clamp_min(1.0)
+        carv_ps = (F.relu(-sdf_obj) * empty_px.unsqueeze(3)
+                   ).sum(dim=(1, 2, 3)) / (empty_px.sum(dim=(1, 2)) * 64).clamp_min(1.0)
+
+        wv = w * valid
+        presence_raw = (wv * pres_ps).mean()
+        carving_raw = (wv * carv_ps).mean()
+        terms["presence_raw"] = presence_raw
+        terms["carving_raw"] = carving_raw
+        terms["presence_loss"] = self.lambda_presence * presence_raw
+        terms["carving_loss"] = self.lambda_carving * carving_raw
+        terms["visual_valid_frac"] = valid.mean()
+        terms["loss"] = (terms["loss"] + self.lambda_presence * presence_raw
+                         + self.lambda_carving * carving_raw)
+        return terms
+
     @torch.no_grad()
     def run_snapshot(
         self,
@@ -360,6 +450,9 @@ class ImageConditionedFlowMatchingCFGDistillationTrainerConditioned(
         B = x_0.shape[0]
         kept = (cond_dict['x0_hand'].reshape(B, -1).abs().sum(dim=1) > 0).float()
         terms = self._add_physics_losses(terms, pred, x_t, t, x_0, x0_hand, touch, kept)
+        if self.use_visual_losses and (self.lambda_presence > 0 or self.lambda_carving > 0):
+            terms = self._add_visual_losses(terms, pred, x_t, t, x_0,
+                                            mask_obj, mask_hand, kept)
 
         target_mse_per_instance = np.array([
             F.mse_loss(pred[i], target[i]).item()

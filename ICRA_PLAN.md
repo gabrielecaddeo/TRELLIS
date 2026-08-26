@@ -56,6 +56,11 @@ voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
 - **P4 (stretch, decision pending with user)** — recursive fusion distilled into
   the student (warped prior as conditioning channel); the learned 3D-CNN fusion
   aggregator is a cheaper sibling that would also subsume the fusion-arm branch.
+- **P5 — visual (silhouette) loss (user idea, 2026-08-26): VALIDATED +
+  fine-tune RUNNING** (§7.18): mask↔column correspondence pixel-grade for
+  visible objects; presence/carving hinges implemented in the distillation
+  trainer; job 616 fine-tunes A@81k 1 segment. THESIS RESULT §7.17: fused A@81k
+  beats the single-view teacher on all metrics (IoU 0.642 vs 0.607).
 
 ## Training state
 
@@ -74,12 +79,12 @@ voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
 
 ## Execution order (remaining)
 
-1. Read jobs 532/533 (copy-init 16k raw a/b @8/25) + 534 (student-A 65k @8):
-   quality-side read on copy-init vs from-scratch and the 48k→65k slope.
-2. 2026-08-26 ~10:00: final ckpts land (A ~82k EMA, B ~32k EMA — B's EMA is
-   copy-init-seeded so residue is benign). Paired a/b both (25/8/4, 3 arms,
-   `--data_seed 1337`) → pick the paper's student.
-3. Full-set (n=351) fusion tables for the chosen student at 8 (+25) steps.
+1. DONE 2026-08-26: student decision = A@81k (§7.16); A81k paired fusion
+   (§7.17, thesis passes); visual loss validated+implemented+launched (§7.18).
+2. 2026-08-27/28: read visual-ft (616) vs A-extension (610/612 → ~114k) vs
+   B-extension (611/613 → ~64k) — triple comparison, paired a/b + fusion.
+3. Full-set (n=351) fusion @8 for the final chosen ckpt (599 = A@81k full-set,
+   running; redo only if a later ckpt replaces A@81k).
 4. P3: batch-K bf16 latency for the chosen student; assemble the final
    capacity × steps × views frontier table; name the operating point.
 5. Real-capture confirmation: chosen student dex rows (convert via the

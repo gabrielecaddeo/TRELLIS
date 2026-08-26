@@ -15,7 +15,11 @@ State as of 2026-08-25 ~10:30:
   consistency guidance measured (`sample_multiview_consistency` in
   flow_euler.py; helps single view, does NOT stack with fusion).
 - bf16 == fp32 quality (§7.13); deployment mode = student@8 bf16 (0.52 s H200).
-- IN FLIGHT (check `sacct -j 513,516,532,533,534` FIRST):
+- STUDENT DECIDED (§7.16, 2026-08-26): **A@81k EMA** = the paper's student
+  (`outputs/distill_teacherv2/ckpts/denoiser_ema0.9999_step0081000.pt`); physics
+  beats teacher, guidance absorbed. B (copy-init) = equal-compute-wins ablation.
+  Both chains ENDED; no training running. Open user decisions: extend A and/or B.
+- IN FLIGHT (check `sacct -j 599,600` FIRST; the older list below is DONE):
   - 513 = student-A (8×2) extension segment 5 → ~82k in
     `outputs/distill_teacherv2/`, wall-ends 2026-08-26 ~09:50 (exit 138/FAILED
     in sacct = normal graceful wall kill). NO successor queued after it.
@@ -27,17 +31,27 @@ State as of 2026-08-25 ~10:30:
   - 534 = student-A 65k EMA paired a/b @8 (H200) →
     `outputs/diagnostics/ab_guidance_student65k_ds_steps8.json`
 
+NEW in flight 2026-08-26 evening (check `sacct -j 599,610,611,612,613,616`):
+- 599 = A81k full-set fusion (n=351 @8, L40S) → `mv_fusion_studentA81k_s8_full.json`
+- 610→612 = student-A extension segments 6-7 → ~114k (ends 2026-08-28 ~morning)
+- 611→613 = student-B extension segments 3-4 → ~64k (same)
+- 616 = VISUAL-LOSS fine-tune of A@81k (§7.18): silhouette presence+carving
+  terms (user idea, validated §7.18), 1×24h, `outputs/distill_visual_ft/`.
+  Verify early log: presence_raw/carving_raw/visual_valid_frac keys, no NaN,
+  distill_mse stays ~0.049 (warm start must not jump).
+DONE 2026-08-26: §7.16 student decision = A@81k; §7.17 THESIS RESULT (fused
+A@81k beats single-view teacher: IoU 0.642 vs 0.607, paired); §7.18 visual loss
+validated + implemented (`_add_visual_losses` in distillation.py, calibration +
+erode/dilate margins; validator: tools/validate_mask_column_correspondence.py).
+
 Tasks, in order (details in ICRA_PLAN.md "Execution order"):
-1. Read 532/533/534 → §7.16: does copy-init's loss advantage (distill 0.052@16k
-   = from-scratch's 48–65k level) show up in QUALITY? Compare against §7.6/§7.8
-   rows (teacher single 0.607 IoU @8; student-A 48k 0.553).
-2. After the chains end (Wed ~10:00): paired a/b on A's ~82k EMA and B's ~32k
-   EMA (B's EMA is copy-init-seeded → residue benign) at 25/8/4, 3 arms,
-   `--data_seed 1337` → PICK THE PAPER'S STUDENT, record the decision.
-3. Full-set (n=351) fusion for the chosen student:
-   `sbatch --partition=gpu-l40s tools/multiview_fusion_eval.sbatch --model_dir
-   <dir> --ckpt <ema> --num_groups 351 --steps 8 --output ...` (pattern of jobs
-   529/528).
+1. When 616 ends (~Thu morning): paired a/b (25/8/4, `--data_seed 1337`) +
+   48-group fusion on `outputs/distill_visual_ft/ckpts/<final EMA>`; when
+   610/612 and 611/613 end (~Fri): same for A@~114k and B@~64k. TRIPLE
+   comparison vs A@81k rows (§7.16/§7.17) separates visual-loss gain from
+   more-training gain. Prediction: carving cuts CD/EMD outliers.
+2. Re-pick the final ckpt if any of the three beats A@81k; rerun full-set
+   fusion only for the winner (pattern of job 599).
 4. P3 frontier assembly: extend tools/bench_latency.py with batch-K (K views in
    ONE batched forward, bf16 autocast) on H200; build the final capacity × steps
    × views table; name the deployment operating point.

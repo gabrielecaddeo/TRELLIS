@@ -776,3 +776,90 @@ mixed; the paired a/b (jobs 532/533, raw 16k ckpt) gives the quality-side read.
 Extension (8×2) segment 4 ended at 65k (distill 0.0493/target 0.188, slope
 flattening); segment 5 (513) → ~82k tomorrow ~10:00. Queued: 532/533 = copy-init
 16k raw @8/25; 534 = student 65k EMA @8 (all paired, `--data_seed 1337`).
+
+### 7.16 FINAL STUDENT DECISION (jobs 543–548, 2026-08-26): Student A @81k
+
+Paired a/b, both finals, 25/8/4 steps (`ab_guidance_student{A81k,B32k}_ds_*`):
+
+| @8 steps unguided | contact −floor | hit1v | IoU | CD | NC | F@0.02 |
+|---|---|---|---|---|---|---|
+| teacher 52k | 3.31e-3 | 0.639 | 0.679 | 0.0480 | 0.873 | 0.639 |
+| **A 81k (8×2, 5 seg)** | **1.70e-3** | **0.666** | **0.608** | 0.0673 | 0.845 | **0.516** |
+| B 32k (8×4 copy-init, 2 seg) | 5.80e-3 | 0.555 | 0.576 | **0.0655** | 0.837 | 0.470 |
+
+**Decision: Student A @81k EMA (`outputs/distill_teacherv2/ckpts/
+denoiser_ema0.9999_step0081000.pt`) is the paper's student.** It beats B on
+IoU/F@0.02/hit1v and by 3.4× on contact excess — and its PHYSICS now BEATS THE
+TEACHER (1.70e-3 vs 3.31e-3) at half the parameters and ~⅓ the latency. It is
+step-invariant 25→8 (IoU 0.612/0.608) with mild degradation at 4 (0.583, contact
+6.8e-3). Guidance fully absorbed on A (oc_flow 4.1e-3 > unguided 2.0e-3 @25); B
+is still partially unabsorbed (oc_flow HELPS it: 4.98e-3 < 5.86e-3 — the
+undertrained-regime signature, consistent with the absorption law).
+
+**Copy-init ablation verdict (honest both ways):** at EQUAL compute (2 segments)
+copy-init wins decisively — B@32k vs A@32k: IoU 0.576 vs 0.491, CD 0.0655 vs
+0.0895, contact 5.8e-3 vs 7.1e-3. Copy-init ≈ 2–3× faster convergence. But A,
+run 2.5× longer, ended higher — and 48k→65k→81k kept paying (IoU 0.553→0.585→
+0.608, contact 3.4e-3→2.6e-3→1.7e-3, slope NOT yet flat). Open options (user):
+extend A past 81k (quality still climbing), and/or extend B (2.5× compute
+headroom, likely passes A eventually, but 1.5× params ⇒ ~1.4× inference latency
+— worse for the real-time story). B's chain can resume:
+`sbatch tools/train_distill_teacherv2_s8mlp4.sbatch 3 5`.
+
+### 7.17 THESIS RESULT: fused student A@81k beats the single-view teacher (job 600, 2026-08-26)
+
+Paired 48-group fusion @8 steps (`mv_fusion_studentA81k_s8.json`), same harness
+as §7.11 (compare within-harness rows, not against §7.16's a/b subset):
+
+| @8 steps | contact −floor | IoU | CD | F@0.02 |
+|---|---|---|---|---|
+| teacher single (§7.11) | 3.9e-3 | 0.607 | 0.0501 | 0.606 |
+| **A@81k median_K8** | **−4.2e-4 (below floor)** | **0.642** | **0.0466** | **0.646** |
+| teacher median_K8 (§7.11) | 7.5e-5 | 0.713 | 0.0358 | 0.742 |
+
+**The paper's thesis experiment now passes**: the fused real-time student beats
+the single-view teacher on every metric — at ~⅓ the per-view latency, with K
+views batched in one forward. (Teacher+fusion remains the offline quality
+ceiling.) Full-set n=351 version = job 599, running.
+
+### 7.18 Visual (silhouette) loss: idea, validation, implementation, fine-tune (2026-08-26)
+
+**User proposal**: the conditioning image maps to the grid such that each pixel
+corresponds to a voxel column along the -z view axis — so the 2D masks are exact
+3D supervision: (1) object-mask pixels ⇒ the column MUST contain object
+("presence"); (2) pixels with neither object nor hand mask ⇒ the column is
+PROVABLY empty, since only the hand could occlude ("space carving"); (3) hand
+pixels ⇒ no constraint.
+
+**Validation** (`tools/validate_mask_column_correspondence.py`, jobs 614/615,
+84 held-out views; orientation found by 8-variant sweep: mask[63−y, x] ↔ grid
+(x,y)):
+- Raw: IoU mean 0.54 / p90 0.86, presence violations 10.5%, carving 1.5%.
+- Diagnosis: BIMODAL — clearly-visible objects align at IoU 0.90–0.95
+  (pixel-grade: the dataset construction and the paper's assumption are
+  CORRECT); the low tail is tiny/hand-buried objects (dice, marbles) whose
+  visible mask is ~empty — no signal, not misalignment.
+- With per-view similarity calibration (area-ratio scale + centroid shift vs the
+  GT-SDF z-projection) + 1px erosion: presence violations 10.5% → **2.0%**
+  (p90 5.2%). Carving artifact learned: erode the OBJECT mask → false carving
+  violations; the loss instead DILATES (object ∪ hand) before declaring empty.
+
+**Implementation** (`_add_visual_losses` in
+`trellis/trainers/flow_matching/distillation.py`, config-gated):
+presence = hinge on soft-min SDF along columns of the eroded calibrated object
+mask (margin 1 voxel); carving = relu(−sdf) in columns outside the dilated
+mask union; per-sample calibration fitted against the GT projection (GT decode
+already available in the physics block); views with <30 visible-object pixels
+get zero weight; same time-weighting + CFG-drop gating as physics. Config:
+`..._distill_teacherv2_visual_ft.json` (λ_presence = λ_carving = 2.0, λ_ni
+fixed 30 no-warmup).
+
+**Fine-tune arm = job 616** (`tools/train_distill_visual_ft.sbatch`): 1×24h,
+2 GPUs, fresh `outputs/distill_visual_ft/`, warm-started from A@81k EMA.
+Readout (tomorrow): triple comparison A@81k vs A+visual-ft vs A-extension
+(~114k, jobs 610/612 running) — separates "visual loss helped" from "more
+training helped" at comparable extra compute. Prediction: carving cuts
+floating-geometry outliers (CD/EMD tails), partially replicating fusion's
+benefit at single-view latency. If confirmed, the mask terms also become
+measurement-guidance candidates at inference (masks are observations — the
+absorption law §7.13 says measurement terms keep helping).
