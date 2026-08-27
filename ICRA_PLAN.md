@@ -102,6 +102,23 @@ voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
    (user to arrange rig access — without it, target a workshop).
 6. P4 / learned-aggregator if time allows (user decision).
 
+## Future work (paper note, agreed with user 2026-08-27)
+
+**Token count is the fifth frontier axis** — the un-spent latency lever. All
+flow cost scales with the N=4096 latent tokens (attention N², rest N); the
+§7.20 bench shows kernels are throughput-bound at batch 1, so ONLY fewer
+tokens (or fewer steps) buys real speed now. Two tiers:
+- **Patch-2 student (cheap, future work / rebuttal ammunition)**: patch_size 2
+  tokenizes the SAME 16³×8 latent into 8³=512 tokens — same VAE, same dataset
+  latents, same frozen teacher; only the student retrains (existing
+  distillation machinery). Est. 4–6× on flow → ~0.1 s/frame ≈ 10 Hz. Named in
+  the paper as future work; NOT needed for the current claims (1.8 Hz already
+  beats the §7.8 ~1 Hz target).
+- **Smaller latent (8³)**: ~8–60× flow speedup but retrains the ENTIRE stack
+  (VAE + re-encoded latents + flow) and risks the VAE reconstruction bound
+  becoming the accuracy floor (16³ is already 4×/axis compression of the 64³
+  SDF). Out of scope for this paper.
+
 ## Open questions for the user
 - Rig access / camera setup timeline (the latency demo on live captures is the
   centerpiece for ICRA vs workshop).
