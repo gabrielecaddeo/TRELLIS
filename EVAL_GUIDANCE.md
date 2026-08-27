@@ -970,9 +970,14 @@ decode 8/15/31/55 ms at K=1/2/4/8 add on top):
 | B 8×4 @8 | 541 | 1055 | 2041 | 4006 |
 
 Verdicts:
-1. Batch scaling is near-linear (K8 = 7.4× K1) — the 4096-token latent
-   transformer already saturates the H200 at batch 1; batching buys packaging,
-   not throughput.
+1. Batch scaling is near-linear (K8 = 7.4× K1). NOT because the GPU is at
+   peak FLOPs (utilization is ~10%; the op mix is bandwidth/compute-blended
+   fp32-weight autocast with 3 cross-attns) but because one sample already
+   presents 4096-token × 1024-ch GEMMs — enough parallelism to fill the SMs,
+   so every kernel runs at its throughput limit at batch 1 and batch K adds
+   proportional work. Batching buys packaging (one launch, one cond pass),
+   not per-sample speedup. Training corroborates: ~5 s/step at batch 8/GPU
+   back-solves to the same per-sample throughput.
 2. **The "8-view student batch < 1 teacher forward" claim holds vs the
    teacher's 25-step default (4.09 s total vs 4.73 s) but NOT vs teacher@8
    (1.63 s)** — quote it against the 25-step baseline only, or better: lead
