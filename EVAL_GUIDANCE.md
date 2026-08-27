@@ -949,3 +949,55 @@ i.e. no mis-calibration blowup, but confirming the near-no-op risk above: the
 hinges are active (nonzero, fluctuating) yet tiny vs distill_mse 0.05. The
 extension segments also verified: 610 resumed A from step 81000, 611 resumed B
 from 32000, both "Starting training..." clean (jobs started 17:03).
+
+### 7.20 Triple comparison + P3 batch-K latency (2026-08-27 evening, jobs 617/619; IN PROGRESS)
+
+**Walls all graceful (exit 138)**: A-extension segment 6 → step 97.5k (612
+running → ~114k Fri), B → 48.5k (613 → ~66k Fri), visual-ft ENDED at 16k
+steps (1×24h as designed; its EMA = ~80% ft trajectory + 20% A@81k init, so
+any true delta is mildly attenuated).
+
+**Batch-K bf16 latency (job 617, H200, `latency_h200_batchK_bf16.json`)** —
+flow-sampling ms, K views in ONE forward (cond encode: 26/47/83/157 ms and
+decode 8/15/31/55 ms at K=1/2/4/8 add on top):
+
+| flow ms, bf16 | K=1 | K=2 | K=4 | K=8 |
+|---|---|---|---|---|
+| teacher @25 | 4691 | 9238 | 17991 | 35408 |
+| teacher @8 | 1598 | 3149 | 6129 | 12057 |
+| **A 8×2 @8** | **525** | 1025 | 1979 | **3882** |
+| A 8×2 @4 | 281 | 547 | 1057 | 2071 |
+| B 8×4 @8 | 541 | 1055 | 2041 | 4006 |
+
+Verdicts:
+1. Batch scaling is near-linear (K8 = 7.4× K1) — the 4096-token latent
+   transformer already saturates the H200 at batch 1; batching buys packaging,
+   not throughput.
+2. **The "8-view student batch < 1 teacher forward" claim holds vs the
+   teacher's 25-step default (4.09 s total vs 4.73 s) but NOT vs teacher@8
+   (1.63 s)** — quote it against the 25-step baseline only, or better: lead
+   with the STREAMING operating point, where each new frame costs one
+   student@8 forward (0.56 s total ≈ 1.8 Hz) and the ring-buffer median fuses
+   cached SDFs for free — K8 fusion quality (§7.17) at single-view latency,
+   amortized.
+3. **CORRECTION to §7.16's B-latency fear: B (8×4) costs only +3% over A
+   (541 vs 525 ms @8)** — attention dominates; mlp_ratio is nearly free. The
+   "1.5× params ⇒ ~1.4× latency" projection was wrong (that scaling applies
+   to blocks, not mlp width). If B@66k beats A on Friday's paired a/b, latency
+   is NO argument against choosing it.
+
+**Visual-ft vs A@81k, paired @8 steps (job 619, n=64, ds1337)** — unguided:
+
+| @8 unguided | c_ex | hit1v | IoU | CD | NC | F@0.02 | EMD |
+|---|---|---|---|---|---|---|---|
+| A@81k | 1.70e-3 | 0.666 | 0.608 | 0.0673 | 0.845 | 0.516 | 0.0868 |
+| **A+vft (16k)** | 1.61e-3 | 0.671 | **0.612** | **0.0653** | 0.847 | **0.527** | **0.0848** |
+
+Every metric moves the right way — IoU +0.004, CD −3%, F@0.02 +0.011, EMD
+−2.3% (the CD/EMD direction matches the carving-cuts-outliers prediction) —
+but the gains are SMALL vs what 16k steps of plain extension historically buys
+(A 65k→81k: IoU +0.023). The near-no-op reading (§7.19) is so far supported:
+on a well-trained student the visual prior is largely absorbed. The clean
+same-compute comparison is Friday: A@97k-ish rows (622-625) vs this. Guidance
+arms on vft unchanged (guided_v2/oc_flow still harmful at 8 steps; guided_asis
+inert-to-slightly-worse — consistent with every §7 result).

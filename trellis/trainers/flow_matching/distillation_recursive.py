@@ -39,9 +39,10 @@ class ImageConditionedFlowMatchingCFGDistillationRecursiveTrainerConditioned(
         self.ss_enc_ckpt = ss_enc_ckpt
         self.ss_enc = None
         super().__init__(*args, **kwargs)
-
-    def init_models_and_more(self, **kwargs):
-        super().init_models_and_more(**kwargs)
+        # AFTER super().__init__: ss_dec_path is only assigned by
+        # flow_matching.__init__ after its own super() call returns, so it does
+        # not exist yet inside init_models_and_more (the smoke of job 629
+        # failed exactly there) — same reason _loading_ss_dec runs post-init.
         if self.use_prior_latent:
             self._loading_ss_enc()
 
