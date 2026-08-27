@@ -85,7 +85,55 @@ Insight: guidance is for steering *decisions*, and decisions happen at high
 noise; at low noise strong CFG mostly amplifies artifacts — and skipping it
 there also halves the compute for that part of the trajectory.
 
-## 4. The hand conditioning (the paper's heart)
+## 4. The camera-frame scene structure (how everything is registered)
+
+A design choice that is easy to miss and worth explaining explicitly in the
+interview: **the reconstruction lives in a camera-aligned, pose-normalized
+frame**, not in a world frame or an object-canonical frame.
+
+**What that means concretely.** The 64³ grid is anchored to the input view: the
+camera looks along the grid's −z axis, x points right and y up in the image,
+and the whole scene — hand AND object together, rigidly — is placed into the
+cube by a similarity transform (rotation from the camera pose, plus a scale and
+translation that fit the scene into the normalized volume). Both the hand SDF
+and the object SDF are expressed in this same frame, and the conditioning image
+is framed so that the object's 2D extent is proportional to its voxel
+footprint: the image and the volume are *structurally aligned* — a region of
+the image corresponds, approximately, to a column of voxels along the viewing
+axis.
+
+**The insights behind it (three, and they compound):**
+
+1. **It removes global pose estimation from the learning problem.** An
+   object-canonical output frame ("reconstruct the mug in ITS canonical pose")
+   requires knowing what canonical means for a never-seen object — an
+   ill-defined problem. A viewer-centered frame sidesteps it: the model
+   reconstructs *the scene as seen*, and the pose question never has to be
+   answered. This is the classic viewer-centered vs object-centered argument,
+   and it is why the approach generalizes to novel objects.
+2. **Alignment makes the conditioning cheap to use.** Because image axes and
+   grid axes agree, the cross-attention between image tokens and volume tokens
+   doesn't have to learn an arbitrary 2D↔3D correspondence from scratch — the
+   mapping is close to "this patch of the image speaks about this column of
+   space." The same registration is what makes the hand mask meaningful in 3D
+   and what lets the hand SDF, computed from proprioception in the camera
+   frame, drop into the grid with no learned alignment at all.
+3. **The similarity normalization spends resolution where it matters.** Every
+   scene is scaled to fill the cube, so all 64³ voxels describe hand+object
+   rather than empty room, and the model becomes scale-invariant by
+   construction (absolute size is a known number carried on the side, not
+   something the network must encode).
+
+**The one price, and why it's the right price.** A camera-frame output means
+the raw reconstruction carries a view-dependent pose and a normalization scale
+— which is why mesh evaluation aligns with ICP before measuring (the metric
+should judge *shape*, not the frame bookkeeping). For robotics this cost is
+nominal: the robot knows its camera extrinsics, so camera frame converts to
+robot frame with a fixed known transform — unlike an object-canonical frame,
+which would need to be *estimated*. In other words: the frame the model outputs
+is the frame the robot actually wants.
+
+## 5. The hand conditioning (the paper's heart)
 
 Three channels, each carrying a different kind of knowledge, each injected
 where it is most natural:
@@ -116,7 +164,7 @@ sensors), and each covers a blind spot of the others. The image sees the
 visible side; the contacts constrain the hidden side; the hand geometry defines
 the free space; the mask arbitrates the boundary.
 
-## 5. The physics losses (the second contribution)
+## 6. The physics losses (the second contribution)
 
 During training, at each step we take the model's current belief x̂₀ = x_t −
 t·v̂, decode it through the *frozen, differentiable* VAE decoder into an actual
@@ -143,7 +191,7 @@ Euler step, decode x̂₀, take the gradient of the physics energy with respect 
 the current state, and nudge the velocity accordingly (a DPS-style correction).
 This is a test-time knob — training-time physics does the heavy lifting.
 
-## 6. Data: why synthetic, and how
+## 7. Data: why synthetic, and how
 
 Training data is synthetic: thousands of grasps of household objects (YCB and
 large object collections) in simulated robot hands, each rendered from 24
@@ -160,7 +208,7 @@ Evaluation is on **real captures**: a DexYCB-derived benchmark (~1000 in-hand
 frames of YCB objects, real cameras, real hands-with-objects), reconstructing
 from one view per instance and comparing meshes against the known YCB models.
 
-## 7. Metrics — and the one honest subtlety
+## 8. Metrics — and the one honest subtlety
 
 Chamfer distance (squared), Normal Consistency, F-score at increasing
 thresholds, and Earth Mover's Distance, all computed after **ICP alignment** in
@@ -172,7 +220,7 @@ reproduced values for the published model on the real benchmark are CD²
 0.046/0.018 (mean/median), NC 0.81, F@0.02 0.13 rising to F@0.10 0.70 — quote
 the paper's own figures in print.
 
-## 8. Model card (if asked for specs)
+## 9. Model card (if asked for specs)
 
 - Diffusion-transformer (DiT-style): 24 blocks, width 1024, 16 heads, MLP
   ratio 4 (~0.75B parameters), operating on 4,096 latent tokens (16³).
@@ -183,7 +231,7 @@ the paper's own figures in print.
 - Inference: 25 Euler steps, CFG 5.0 on the high-noise interval, one image +
   hand state in, one mesh out via marching cubes.
 
-## 9. Insights worth saying out loud (the quotable lines)
+## 10. Insights worth saying out loud (the quotable lines)
 
 - "The hand is both the problem and the answer: it hides the object, but a
   robot knows its own hand perfectly — geometry, pose, and touch — and that
@@ -198,7 +246,7 @@ the paper's own figures in print.
 - "Everything the model is conditioned on is information a robot already has
   for free. No extra sensors, no scanning motion — one glance."
 
-## 10. Likely questions, suggested answers
+## 11. Likely questions, suggested answers
 
 - *Why not classic multi-view / photogrammetry?* One glance is the setting:
   manipulation shouldn't pause for a scanning trajectory. And classic methods
@@ -224,7 +272,7 @@ the paper's own figures in print.
   trajectories → fewer sampling steps, and a clean closed-form current-shape
   estimate that the physics losses and guidance are built on.
 
-## 11. Do NOT bring up (scope guard)
+## 12. Do NOT bring up (scope guard)
 
 Distillation/students, the retrained teacher, guidance-absorption findings,
 multi-view fusion, consistency guidance, silhouette losses, latency numbers on
