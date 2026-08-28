@@ -28,7 +28,7 @@ export TORCH_HOME="${TORCH_HOME:-$HOME/.cache/torch}"
 
 python -u tools/precompute_student_recons.py \
     --model_dir outputs/distill_teacherv2 \
-    --ckpt denoiser_ema0.9999_step0081000.pt \
+    --ckpt denoiser_ema0.9999_step0113000.pt \
     --data_dir "${REPO}/datasets_split/Leap_Hand_train,${REPO}/datasets_split/Hands_train,${REPO}/datasets_split/Hands_Google_train" \
     --out_dir "${REPO}/outputs/p4_prior_recons" \
     --shard "${SHARD}" --num_shards "${NUM_SHARDS}"

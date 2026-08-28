@@ -33,7 +33,7 @@ SBATCH=/opt/share/sw/amd/gcc-11.4.1/slurm-24.11.7/bin/sbatch
 
 CONFIG="${REPO}/configs/generation/ss_flow_img_dit_S_16l8_fp16_sdf_conditioned_distill_teacherv2_p4_recursive${CONFIG_SUFFIX}.json"
 OUTPUT_DIR="${REPO}/outputs/p4_recursive"
-INIT_CKPT="${REPO}/outputs/distill_teacherv2/ckpts/denoiser_ema0.9999_step0081000.pt"
+INIT_CKPT="${REPO}/outputs/distill_teacherv2/ckpts/denoiser_ema0.9999_step0113000.pt"
 
 DATA_TRAIN="${REPO}/datasets_split/Leap_Hand_train,${REPO}/datasets_split/Hands_train,${REPO}/datasets_split/Hands_Google_train"
 DATA_TEST="${REPO}/datasets_split/Leap_Hand_test,${REPO}/datasets_split/Hands_test,${REPO}/datasets_split/Hands_Google_test"

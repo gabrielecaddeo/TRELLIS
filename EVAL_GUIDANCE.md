@@ -1034,3 +1034,39 @@ warm-start unexpected keys [], distill_mse stable at A@81k's level 0.046-0.050
 (zero-init prior = true no-op at scale), frozen ss_enc loaded, snapshot +
 save exercised (`p4_recursive_smoke/ckpts/` written). P4 is launch-ready
 pending the §7.20 winner + user go.
+
+**TRIPLE COMPARISON COMPLETE (jobs 622-627/635/636, 2026-08-28 evening) —
+WINNER: A@113k on every metric, single and fused.**
+
+Single view, unguided, paired n=64 @8 steps (25-step rows within noise —
+step-invariance holds for all four):
+
+| @8 unguided | c_ex | hit1v | IoU | CD | NC | F@0.02 | EMD |
+|---|---|---|---|---|---|---|---|
+| A@81k | 1.70e-3 | 0.666 | 0.608 | 0.0673 | 0.845 | 0.516 | 0.0868 |
+| A+vft (16k) | 1.61e-3 | 0.671 | 0.612 | 0.0653 | 0.847 | 0.527 | 0.0848 |
+| **A@113k** | **9.15e-4** | **0.703** | **0.633** | **0.0584** | **0.853** | **0.548** | **0.0783** |
+| B@64k | 4.08e-3 | 0.606 | 0.622 | 0.0586 | 0.853 | 0.527 | 0.0791 |
+
+48-group fusion @8, median_K8: A@81k 0.642/0.0466 < B@64k 0.651/0.0436 <
+Avft 0.662/0.0445 < **A@113k 0.667/0.0430** (IoU/CD; F@0.02 0.676).
+
+Verdicts:
+1. **Final student re-picked: A@113k EMA**
+   (`outputs/distill_teacherv2/ckpts/denoiser_ema0.9999_step0113000.pt`).
+   Physics excess 9.2e-4 = 3.6× BELOW the teacher (3.31e-3); quality still
+   climbing ~linearly per segment (fused IoU 0.642→0.667 over 32k) — training
+   was stopped by the calendar, not convergence.
+2. **Visual loss final verdict (§7.18)**: positive and MORE compute-efficient
+   per step than plain distillation (+0.020 fused IoU per 16k steps vs +0.025
+   per 32k), gains amplified by fusion — but plain extension at 2× the steps
+   beats it on every metric, so the paper's framing is: a cheap accelerant /
+   measurement-guidance candidate, not a replacement for training. Untested:
+   stacking it on A@113k.
+3. **B@64k**: guidance absorption now complete (oc_flow hurts at 25 steps:
+   4.58e-3 vs 3.90e-3), fused quality (0.651) beats A@81k but not A@113k;
+   physics excess stays ~4e-3 (teacher-level, 4.5× worse than A@113k). B's
+   copy-init story stands as the §7.16 equal-compute ablation; not the final.
+4. Follow-ups launched: 637 = full-set n=351 fusion for A@113k, 638→639 =
+   dex rows chain (tag a113k, @8 steps, canonical ICP). P4 INIT_CKPT +
+   precompute --ckpt updated to A@113k; launch awaiting user go.
