@@ -1006,3 +1006,31 @@ on a well-trained student the visual prior is largely absorbed. The clean
 same-compute comparison is Friday: A@97k-ish rows (622-625) vs this. Guidance
 arms on vft unchanged (guided_v2/oc_flow still harmful at 8 steps; guided_asis
 inert-to-slightly-worse — consistent with every §7 result).
+
+**Overnight completion (jobs 618/620/621, read 2026-08-28 am) — the fusion
+result revises the near-no-op reading upward.** Single-view a/b: vft better
+at EVERY step count (IoU +0.003/+0.004/+0.009 at 25/8/4 — largest gain at the
+lowest step count), CD −2.7/−3.0/−3.2%, contact excess uniformly lower.
+48-group fusion @8 (`mv_fusion_studentAvft_s8.json`, vs job 600 paired):
+
+| @8 steps | c_ex | IoU | CD | F@0.02 | EMD |
+|---|---|---|---|---|---|
+| A@81k single | 2.91e-3 | 0.555 | 0.0605 | 0.531 | 0.0788 |
+| Avft single | 2.57e-3 | 0.565 | 0.0589 | 0.539 | 0.0778 |
+| A@81k median_K8 | −4.2e-4 | 0.642 | 0.0466 | 0.646 | 0.0672 |
+| **Avft median_K8** | −3.5e-4 | **0.662** | **0.0445** | **0.666** | 0.0675 |
+
+**The visual-loss gain AMPLIFIES under fusion**: +0.010 single → **+0.020
+fused IoU** (CD −4.5%, F@0.02 +0.020) — consistent with the §7.18 mechanism
+(carving removes per-view floating geometry that the median can't always
+out-vote; cleaner votes fuse better). Avft fused (0.662) now sits clearly
+above the single teacher (0.607) and 60% of the way to teacher-K8 (0.713).
+Verdict pending Friday's A@114k rows: vft got 16k extra steps vs the
+extension's ~33k, so if A@114k fused < 0.662 the visual loss wins at HALF the
+extra compute — and becomes a real §7.20 conclusion, not a no-op.
+
+**P4 smoke rerun (job 634): PASS** — 49 min, 400/400 steps, 0 errors,
+warm-start unexpected keys [], distill_mse stable at A@81k's level 0.046-0.050
+(zero-init prior = true no-op at scale), frozen ss_enc loaded, snapshot +
+save exercised (`p4_recursive_smoke/ckpts/` written). P4 is launch-ready
+pending the §7.20 winner + user go.
