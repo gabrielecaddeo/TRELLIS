@@ -1128,3 +1128,12 @@ Claim map: prior-as-method 2v1; visual-early 3v1; best scratch recipe 4v2v3;
 warm-vs-scratch LOSS-MATCHED 8v4 (totals reported); visual-warm 6v5 (+
 equal-compute Avft vs A@97k); prior-on-converged 8v6. Every P+ cell also
 gets a single-view (prior-dropped) eval = copy-shortcut check.
+
+**CHECKPOINT-MATCHING RULE (user, 2026-08-28): every within-regime factorial
+comparison uses the SAME explicitly-named step.** Scratch cells → the 48k
+ckpt (chains overshoot to ~50k; ignore the overshoot; NEVER latest_ema).
+Warm cells → same ADDED steps (warm runs restart the counter at 0): primary
+readout at +16k (643@16k vs 648@16k vs A@113k+0); a +32k rung needs 643
+extended one segment (optional, decide after the +16k read). Cross-regime
+8v4 is not step-matchable — report total compute. Warm-started EMAs are
+valid from early steps (init = parent, not random).
