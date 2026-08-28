@@ -102,9 +102,9 @@
             "contact_mode": "mask",
             "ni_margin": 0.015625,
             "physics_time_power": 2.0,
-            "use_visual_losses": false,
-            "lambda_presence": 0.0,
-            "lambda_carving": 0.0,
+            "use_visual_losses": true,
+            "lambda_presence": 2.0,
+            "lambda_carving": 2.0,
             "visual_min_mask_px": 30,
             "use_prior_latent": true,
             "ss_enc_ckpt": "step0300000"

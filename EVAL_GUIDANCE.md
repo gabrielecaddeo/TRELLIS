@@ -1070,3 +1070,20 @@ Verdicts:
 4. Follow-ups launched: 637 = full-set n=351 fusion for A@113k, 638→639 =
    dex rows chain (tag a113k, @8 steps, canonical ICP). P4 INIT_CKPT +
    precompute --ckpt updated to A@113k; launch awaiting user go.
+
+**P4 LOSS CHANGE (user decision 2026-08-28 ~23:00): visual losses ON in P4**
+(§7.19's "visual if §7.18 validates" clause — it validates). Configs
+`..._p4_recursive{,_smoke,_stage2}.json` now use_visual_losses λ=2/2. Chain
+restarted (~1000 steps lost): 640/644 cancelled, fresh smoke = 647 (the
+visual+prior combination was never smoke-tested together — verify
+presence_raw/carving_raw present AND distill_mse ≈0.05 no-jump), chain = 648
+gated afterok:647, segment 2 self-queues. Ablation is now CLEANER: 643
+(A@113k+visual, no prior) is the exact no-prior control for P4
+(A@113k+visual+prior) — the P4 delta isolates the prior channel with visual
+held constant. Rationale: carving teaches per-view provably-empty columns —
+exactly the anti-copy signal for prior integration.
+
+**Equal-compute visual-loss control queued (user request): 645/646 =
+A@97k @8 a/b + fusion** — the missing §7.20 control: A@81k+16k-visual (Avft)
+vs A@81k+16k-plain (A@97k) at IDENTICAL total compute. Decides whether the
+visual loss is per-step better (upgrade the §7.20 verdict) or absorbed.
