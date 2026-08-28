@@ -1,109 +1,91 @@
 # Prompt for a fresh session (copy-paste from here down)
 
-Read ICRA_PLAN.md and EVAL_GUIDANCE.md §7 (LIVE results ledger, §7.1–§7.19)
+Read ICRA_PLAN.md and EVAL_GUIDANCE.md §7 (LIVE ledger, now through §7.20)
 before doing anything. TEACHER_RETRAIN.md is historical background only.
 
-State as of 2026-08-26 ~evening:
-- Teacher FROZEN at EMA 52000; ALL its results final (dex §7.2, Pareto §7.6,
-  full-set n=351 fusion tables at 8+25 steps §7.13/§7.15). Never resume it;
-  53k/54k ckpts are unevaluated leftovers.
-- **Paper's student (decided §7.16): A@81k EMA**
-  (`outputs/distill_teacherv2/ckpts/denoiser_ema0.9999_step0081000.pt`);
-  physics beats teacher (contact excess 1.70e-3 vs 3.31e-3 @8 steps), guidance
-  fully absorbed. Copy-init B = "2-3× faster convergence at equal compute"
-  ablation (§7.16).
-- **THESIS RESULT (§7.17): fused A@81k (median K8, 8 images, one batched
-  forward) BEATS the single-view teacher** — IoU 0.642/CD 0.0466/F.02 0.646 vs
-  0.607/0.0501/0.606, paired. Deployment mode: unguided, 8 steps, bf16
-  (== fp32 quality; 0.52 s/frame batch-1 H200).
-- Multi-view P0–P2 DONE; fusion arm = MEDIAN (ablation ladder §7.14);
-  consistency guidance helps single view only, never stack with fusion (§7.13).
-- **Visual silhouette loss (user idea) VALIDATED + implemented (§7.18)**:
-  presence+carving hinges in distillation.py `_add_visual_losses` (per-view
-  calibration, erode-presence/dilate-carving margins, min-mask gate);
-  validator = tools/validate_mask_column_correspondence.py.
-- **P4 recursive student APPROVED (§7.19)** — run AFTER current tests/trainings.
-  Interim streaming demo = ring-buffer median (no training needed).
+State as of 2026-08-28 ~22:30 (everything below is COMMITTED locally; user
+pushes — train repo main; inference repo local main is ahead of origin, push
+to a branch, never its main):
+- Teacher FROZEN at EMA 52000; all its results final. Never resume it.
+- **FINAL STUDENT (§7.20 triple comparison): A@113k EMA**
+  (`outputs/distill_teacherv2/ckpts/denoiser_ema0.9999_step0113000.pt`) —
+  beats A@81k / A+vft@16k / B@64k on EVERY metric, single AND fused
+  (@8 unguided: IoU 0.633, CD 0.0584, contact excess 9.15e-4 = 3.6× BELOW
+  teacher; fused K8: IoU 0.667/CD 0.0430/F.02 0.676). Still climbing —
+  stopped by calendar, not convergence.
+- **Visual loss verdict (§7.18/§7.20)**: real + more compute-efficient per
+  step than plain distillation, gain AMPLIFIES under fusion (+0.010 single →
+  +0.020 fused IoU), but plain 2×-steps extension beats it outright → paper
+  framing: cheap accelerant / measurement-guidance candidate. Stacked test
+  RUNNING (below).
+- B@64k: absorption complete (oc_flow hurts now), fused 0.651 > A@81k but
+  physics stuck at ~4e-3; stays the §7.16 copy-init ablation. NOTE §7.20
+  latency correction: B costs only +3% vs A (mlp width ~free) — latency was
+  wrongly used against B in §7.16's open-options text.
+- P3 batch-K bench DONE (§7.20): near-linear scaling (throughput-bound at
+  batch 1, ~10% peak util — NOT saturation; see corrected wording). Batched
+  K8@8 = 4.09 s total; "beats 1 teacher forward" only vs teacher@25 (4.73 s).
+  LEAD with the streaming operating point: 0.56 s/frame ≈ 1.8 Hz, ring-buffer
+  median fuses cached SDFs free. Future-work note in ICRA_PLAN: token count =
+  5th axis (patch-2 student ≈10 Hz, same VAE; latent shrink out of scope).
 
-DONE 2026-08-26 evening session:
-- 599 COMPLETED → §7.17 full-set table appended: fused A@81k beats teacher
-  single on IoU/F@0.02/NC/contact at n=351, but CD TIES (0.0597 vs 0.0586) and
-  EMD is worse — the n=48 across-the-board win was subset luck on distance
-  metrics. Paper phrasing recorded in §7.17.
-- 616 early-log checklist PASSED (§7.19 note): 0 NaN @100 steps, distill_mse
-  0.048–0.050 (no warm-start jump), valid_frac 0.94–0.97; presence_raw ~2e-4 /
-  carving_raw ~1e-6 = tiny (near-no-op risk stands). 610 resumed A@81000,
-  611 resumed B@32000 clean. NOTE: extension configs log with i_log=500
-  (buffered flush every ~40 min) — a silent log.txt is NORMAL for them.
-- bench_latency.py EXTENDED with --batch_k (per-K cond encode / flow / decode,
-  K views in one forward, pattern of the fusion eval's stacked batch).
-- multiview_fusion_eval.py now accepts --ckpt latest_ema (records resolved
-  name; only for FINISHED single-purpose student dirs, never the teacher dir).
-- Inference repo (NOT committed there yet — see rules): convert_teacher_v2.py
-  generalized (--train_config/--pipeline_dir/--name assembles a student
-  pipeline dir, decoders symlinked, use_checkpoint off); inference_dex uses
-  DEX_PIPELINE_DIR env. New tools/dex_student.sbatch +
-  tools/dex_eval_cm_student.sbatch (convert→infer→canonical-ICP, 486→487
-  pattern, tags e.g. a81k).
-
-IN FLIGHT / PRE-QUEUED (check `squeue -u gcaddeo` + `sacct` FIRST):
-- 610→612 = student-A extension → ~114k (`outputs/distill_teacherv2/`,
-  segment 7/7 = final). 611→613 = student-B → ~64k
-  (`outputs/distill_s8mlp4_copyinit/`, segment 4/4 = final). Graceful wall =
-  exit 138/FAILED. 616 = visual-ft, ends Thu ~17:00.
-- Pre-queued on dependencies (all latest_ema, L40S evals):
-  - after 616: 618/619/620 = ab_vft 25/8/4, 621 = mv_vft_8, and 617 =
-    batch-K bf16 latency bench (H200, teacher+A-arch+B-arch, steps 25/8/4 ×
-    K 1/2/4/8 → `latency_h200_batchK_bf16.json`).
-  - after 612: 622/623/624 = ab_aext 25/8/4, 625 = mv_aext_8.
-  - after 613: 626 = ab_bext_8, 627 = mv_bext_8. (B's 25/4-step a/b NOT yet
-    queued — l40s MaxSubmitPU=10 was full; submit Thu once vft suite drains:
-    same pattern, `--teacher_dir outputs/distill_s8mlp4_copyinit`.)
-  Outputs: `ab_guidance_student{Avft,Aext,Bext}_ds_steps*.json`,
-  `mv_fusion_student{Avft,Aext,Bext}_s8.json`.
+IN FLIGHT (check `squeue -u gcaddeo` + `sacct` FIRST):
+- **640 = P4 stage-1 chain** (USER-APPROVED launch 2026-08-28 ~22:15;
+  segment 2/2 auto-queued afterany) → `outputs/p4_recursive/`, warm-start
+  A@113k, gt_corrupt curriculum. On first read verify log.txt: distill_mse
+  starts ≈0.045-0.05 (no jump — smoke 634 PASSED with 0.046-0.050), no NaN.
+  Graceful wall = exit 138.
+- **641/642 = P4 precompute shards 0/2, 1/2** → `outputs/p4_prior_recons/`
+  (frozen A@113k over training views 0,2,...,22; resumable — if a shard hits
+  its 24h wall before "DONE", RESUBMIT same command). When both DONE:
+  continue the chain with the stage-2 config:
+  `sbatch tools/train_p4_recursive.sbatch 3 4 _stage2` (segments 3-4;
+  STOP_CHAIN sentinel stops everything).
+- **643 = stacked visual-ft on A@113k** (USER-APPROVED) →
+  `outputs/distill_visual_ft113k/`, 1×24h, ends Sat ~22:30. When done:
+  paired a/b 25/8/4 + 48-group fusion (latest_ema is safe — single-purpose
+  finished dir; pattern of jobs 618-621). **If its fused K8 IoU > 0.667 it
+  becomes the paper's final ckpt** → rerun full-set fusion + dex for it and
+  update P4 stage-2... (P4 warm start stays A@113k regardless — decided).
+- **637 = full-set n=351 fusion for A@113k** (~1h45, L40S) →
+  `mv_fusion_studentA113k_s8_full.json` → append to §7.20; compare vs
+  teacher full-set (§7.13) and A@81k full-set (§7.17) — the honest CD/EMD
+  caveat check at scale.
+- **638→639 = dex rows chain for A@113k** (tag a113k, @8 steps, canonical
+  ICP flags) → `summary_student_a113k_s8_dex_total_total_icp.json` in the
+  INFERENCE repo root → the paper's real-capture student row vs §7.2 table.
 
 Tasks, in order:
-1. **TRIPLE COMPARISON** → new §7.20: A@81k (§7.16/§7.17) vs A+visual-ft
-   (Avft) vs A@~114k (Aext), plus Bext: separates visual-loss gain from
-   more-training gain. Prediction: carving cuts CD/EMD outliers (§7.17's
-   full-set CD/EMD tie is exactly the target). Watch the near-no-op risk
-   (§7.19): if Avft ≈ A@81k, record the absorption interpretation honestly.
-   Re-pick the final ckpt if any beats A@81k; rerun full-set fusion for the
-   winner only (pattern of job 599: mv_fusion sbatch, n=351, L40S, ~1h45).
-2. P3 frontier assembly once 617 lands: verify "8-view student batch < 1
-   teacher forward" from `latency_h200_batchK_bf16.json`; assemble the final
-   capacity × steps × views Pareto table; name the deployment operating point.
-3. Dex rows for the FINAL student: `sbatch tools/dex_student.sbatch
-   <train_dir> <ckpt> <tag> 8` then `sbatch --dependency=afterany:<id>
-   tools/dex_eval_cm_student.sbatch <tag> 8` (25 too if wanted for the table).
-4. **P4 build: CODE DONE (see §7.19 build note), launch pending.** Queued:
-   628 = CPU self-test (no-op/gating/warp-parity/dataset), 629 = GPU smoke
-   (400 steps, afterany:616; verify per its header comments: missing keys ==
-   only input_layer_prior.*, step-0 distill_mse ≈0.05, no NaN). If 628/629
-   pass AND the §7.20 winner is known: update INIT_CKPT in
-   tools/train_p4_recursive.sbatch + the precompute sbatch's --ckpt if it
-   changed, then **ASK THE USER** (confirmed 2026-08-26: report the smoke +
-   triple-comparison results FIRST, launch only on their explicit go — do NOT
-   launch autonomously) before launching the real chain
-   (`sbatch tools/train_p4_recursive.sbatch` stage 1 ~2×24h) and the stage-2
-   precompute (`tools/precompute_student_recons.sbatch 0 2` + `1 2`,
-   multi-GPU-day). Stage 2 resumes the chain with CONFIG_SUFFIX=_stage2.
-5. Keep EVAL_GUIDANCE §7 / ICRA_PLAN / NEXT_SESSION_PROMPT / memory updated
-   after each result; commit at phase boundaries.
+1. Read 637 → §7.20 full-set table. Read 639 → dex student row (§7.2
+   companion). Verify 640's first log + 641/642 progress.
+2. Sat eve: 643 ends → eval suite (a/b + fusion, --data_seed 1337) → stacked
+   verdict → possibly re-pick final ckpt (full-set fusion + dex rerun for it
+   only, patterns above).
+3. Sun/Mon: precompute DONE → launch stage-2 chain (command above).
+4. ~Tue: first P4 eval — needs a prior-aware eval path (the a/b harness
+   passes no prior; the P4 model degrades to single-view when cond lacks
+   x0_prior, so baseline evals work as-is; the STREAMING eval — prior from
+   previous frames' recons — needs a new harness: simulate a view sequence,
+   feed warped fused prior of earlier outputs via
+   trainer.get_inference_cond(prior_sdf=..., prior_keep=...)). Compare vs
+   ring-buffer median at equal K (the §7.19 success criterion).
+5. Paper assembly: final frontier table (capacity × steps × views ×
+   streaming), operating point = student@8 bf16 streaming 1.8 Hz.
+6. Keep EVAL_GUIDANCE §7 / ICRA_PLAN / this file / memory updated; commit at
+   phase boundaries.
 
-Open user decisions: rig access timeline (real-time demo = ICRA centerpiece;
-without it, workshop). Everything else is decided — do not re-litigate.
+Open user decisions: rig access timeline (ICRA centerpiece vs workshop).
+P4 launched + stacked vft launched (both approved 2026-08-28). Everything
+else decided — do not re-litigate.
 
-Hard rules:
-- Mesh evals ALWAYS use ICP with the canonical flag set (memory trellis-eval-icp).
-- Cross-model a/b runs ALWAYS pass `--data_seed 1337`; name teacher ckpt
-  explicitly (never `latest_ema` on the teacher dir — grabs the 54k leftover).
-- Never evaluate an EMA ckpt below ~30k steps unless copy-init/warm-start-seeded.
-- GPU via sbatch only; login node OOMs. TRAINING → gpu-h200 (4 jobs/96 CPUs/24h,
-  self-chaining sbatch + STOP_CHAIN); EVALS → gpu-l40s
-  (`sbatch --partition=gpu-l40s <sbatch>`, 2-job quota).
-- Prefer SLURM --dependency chains over session watchers for must-run steps.
-- Ask the user before launching anything ≥ multi-day GPU cost.
-- Git: commit locally on `main`; NO GitHub credentials here — the user pushes.
-  Inference repo (/projects/gcaddeo/inference/TRELLIS): local main is ahead of
-  origin — push to a branch, never its main.
+Hard rules (unchanged):
+- Mesh evals ALWAYS ICP with canonical flags (memory trellis-eval-icp).
+- Cross-model a/b ALWAYS `--data_seed 1337`; name teacher ckpt explicitly.
+- Never evaluate EMA below ~30k steps unless warm-start-seeded (vft/P4 dirs
+  are warm-started → their EMAs are valid from ~16k).
+- GPU via sbatch only; login node OOMs (can't even alloc 4 MB — run even
+  tiny torch tests as cpu-partition jobs). TRAINING → gpu-h200 (4 jobs/96
+  CPUs/24h cap), EVALS → gpu-l40s (2 concurrent/10 submitted).
+- Prefer SLURM --dependency chains; ask user before ≥ multi-day GPU; P4
+  future decisions: report first, launch only on explicit user go.
+- Git: commit locally; user pushes (inference repo → branch only).
