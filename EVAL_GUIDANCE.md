@@ -1087,3 +1087,19 @@ exactly the anti-copy signal for prior integration.
 A@97k @8 a/b + fusion** — the missing §7.20 control: A@81k+16k-visual (Avft)
 vs A@81k+16k-plain (A@97k) at IDENTICAL total compute. Decides whether the
 visual loss is per-step better (upgrade the §7.20 verdict) or absorbed.
+
+**Equal-compute B-vs-A framing (user-flagged 2026-08-28 late; MUST follow in
+the paper).** The §7.20 winner table gives B only 57% of A's compute — never
+read it as an architecture verdict. The equal-compute pairing (existing data,
+jobs 534 + 626, both ds1337 @8): A@65k = c_ex 2.56e-3 / IoU 0.585 / CD 0.0723
+vs B@64k = c_ex 4.08e-3 / IoU 0.622 / CD 0.0586. **Split verdict: copy-init
+wins geometry (+0.037 IoU, −19% CD), from-scratch wins physics (1.6× lower
+contact excess).** Mechanism: copy-init anchors B near the teacher's function
+— geometry converges fast but physics sticks at teacher level (~4e-3 flat
+from 32k→64k ≈ teacher's 3.3e-3), while from-scratch A internalizes the
+physics losses BEYOND the teacher (9.2e-4 @113k). Paper rules: (i) B rows
+always carry their compute label; (ii) B-vs-A claims only at equal compute
+(§7.16 @32k, this table @64k); (iii) A@113k is a budget-allocation outcome,
+not an arch-superiority claim; (iv) "would B@113k win?" = one limitations
+sentence (~3 GPU-days, chain resumable:
+`sbatch tools/train_distill_teacherv2_s8mlp4.sbatch 5 7`).
