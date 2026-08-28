@@ -1137,3 +1137,11 @@ readout at +16k (643@16k vs 648@16k vs A@113k+0); a +32k rung needs 643
 extended one segment (optional, decide after the +16k read). Cross-regime
 8v4 is not step-matchable — report total compute. Warm-started EMAs are
 valid from early steps (init = parent, not random).
+
+**ENDGAME (user, 2026-08-28): factorial picks the RECIPE, then all remaining
+budget extends ONLY the winner** (~Thu readout → extend via the winner's
+self-chaining sbatch with higher MAX_SEGMENTS → final full-set fusion + dex
++ streaming eval for the extended winner only → freeze). Note: if a scratch
+cell wins the method claim, the deployed final likely still extends warm
+cell 8 (inherits A's 113k of capital) — unless the winner's slope projects
+past it within budget; check slopes at readout.
