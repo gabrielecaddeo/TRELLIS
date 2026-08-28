@@ -1116,3 +1116,15 @@ A + ring-buffer median at equal K = recursion-as-method vs fusion-as-method.
 Then P4-warm (from A@113k, visual ON) vs P4-scratch with total compute
 reported = the warm-start/adapter claim; P4-warm vs 643 = prior channel in
 the warm regime. Three-rung ladder, each rung controlled.
+
+**FACTORIAL COMPLETED BY USER DECISION (2026-08-28 ~24:00): cells 3+4
+launched, cell 7 dropped (limitations sentence).** The full 2(regime)×2(V)×
+2(P) design: 1=A@48k ✓, 2=P4-scratch (650), 3=visual-scratch (651,
+`outputs/distill_visual_scratch/`, A's exact recipe + visual λ2/2, ni-warmup
+10k), 4=scratch V+P (652, `outputs/p4_recursive_scratch_visual/`),
+5=A@113k ✓, 6=stacked vft (643), 7=SKIPPED, 8=warm P4 (648). All scratch
+cells: 3 segments → eval the 48k ckpt vs A@48k, gt_corrupt priors only.
+Claim map: prior-as-method 2v1; visual-early 3v1; best scratch recipe 4v2v3;
+warm-vs-scratch LOSS-MATCHED 8v4 (totals reported); visual-warm 6v5 (+
+equal-compute Avft vs A@97k); prior-on-converged 8v6. Every P+ cell also
+gets a single-view (prior-dropped) eval = copy-shortcut check.
