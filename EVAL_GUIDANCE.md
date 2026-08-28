@@ -1103,3 +1103,16 @@ always carry their compute label; (ii) B-vs-A claims only at equal compute
 not an arch-superiority claim; (iv) "would B@113k win?" = one limitations
 sentence (~3 GPU-days, chain resumable:
 `sbatch tools/train_distill_teacherv2_s8mlp4.sbatch 5 7`).
+
+**P4 METHODS CONTROL (user decision 2026-08-28 ~23:45): from-scratch
+recursive student launched** — the paper sells METHODS, so the recursive
+claim gets its matched-compute control: `outputs/p4_recursive_scratch/`
+(job 650+, 3 segments → ~50k steps), random init, EXACTLY student A's loss
+recipe (distill+physics, ni warmup 10k, NO visual — the only delta vs A is
+the prior channel), priors = corrupted GT for the WHOLE run (A-recon priors
+would leak A's knowledge into the from-scratch arm). Eval plan: its 48k ckpt
+vs A@48k (§7.8 evals exist) at matched steps — streaming P4-scratch vs
+A + ring-buffer median at equal K = recursion-as-method vs fusion-as-method.
+Then P4-warm (from A@113k, visual ON) vs P4-scratch with total compute
+reported = the warm-start/adapter claim; P4-warm vs 643 = prior channel in
+the warm regime. Three-rung ladder, each rung controlled.
