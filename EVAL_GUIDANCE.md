@@ -1145,3 +1145,38 @@ self-chaining sbatch with higher MAX_SEGMENTS → final full-set fusion + dex
 cell wins the method claim, the deployed final likely still extends warm
 cell 8 (inherits A's 113k of capital) — unless the winner's slope projects
 past it within budget; check slopes at readout.
+
+### 7.21 Weekend readout (2026-08-30): controls resolve, thesis strengthens, dex student row lands
+
+**1. Equal-compute visual control (645/646): TIE — my per-step-efficiency
+extrapolation was WRONG; the user's demanded control caught it.** At matched
+97k total steps: single-view A@97k slightly ahead (IoU 0.616 vs 0.612,
+c_ex 1.43e-3 vs 1.61e-3), fused Avft slightly ahead (0.662 vs 0.657, F@0.02
+0.666 vs 0.663). Verdict: in the mid/late regime the visual loss ≈ plain
+distillation per step (its §7.20 gains over A@81k were just training).
+Remaining visual hope = EARLY training (cells 3/4; early loss curves do show
+presence_raw falling 20× in 10k steps from scratch, unlike warm runs).
+
+**2. Equal-compute B fused (649): copy-init wins fused geometry decisively**
+— B@64k K8 0.651/0.0436 vs A@65k K8 0.616/0.0500 (+0.035 IoU, −13% CD).
+Equal-compute split (§7.20) now reads: B wins geometry single AND fused;
+A wins physics. Final-model logic unchanged (A@113k absolute champion).
+
+**3. Full-set n=351 A@113k fusion (637): the §7.17 CD caveat RESOLVES.**
+Fused A@113k beats the single-view teacher on IoU 0.667 vs 0.605, CD 0.0542
+vs 0.0586 (now a WIN, was a tie at 81k), F@0.02 0.643 vs 0.568, contact
+−3.1e-3 vs +2.2e-3; only EMD still trails (0.0836 vs 0.0783). Single-view
+A@113k contact is AT floor (−8e-6) on the full set. Paper phrasing upgrades
+to: "beats on every metric except EMD."
+
+**4. Dex real-capture student row (638/639, n=989, canonical ICP): the
+student MATCHES/BEATS its teacher on real captures.** A@113k@8: CD² mean
+0.0307 (−9% vs teacher 0.0336), median 0.0110 (tie), NC 0.838/0.879 (beats
+0.831/0.866); fine-detail F@0.02 0.156 vs 0.170 and F@0.04 0.401 vs 0.418
+slightly under (capacity cost shows only at fine thresholds), F@0.06+ ties.
+220M student ≈ 757M teacher on real data at ⅓ latency — the distillation
+deployment claim on real captures is closed.
+
+**Ops**: precompute DONE (19,259 instances, 113 GB, 2 known-gap failures);
+warm stage-2 queued (657 afterany:654); cells 2/3/4 mid-segment-1/2, healthy
+(no NaN); cell-8 distill_mse 0.039→ falling below parent's 0.044.
