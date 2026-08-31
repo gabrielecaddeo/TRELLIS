@@ -187,9 +187,17 @@ def main():
         # ---- no-prior pass on every view (single-view mode / ring-buffer baseline) ----
         gen2 = torch.Generator(device="cuda").manual_seed(args.seed * 9973 + gi)
         outputs_np_ = {}
+        traj_np = []
         for v in views:
-            _, _, sdfv = run_view(datas[v], None, gen2)
+            x_0v, posv, sdfv = run_view(datas[v], None, gen2)
             outputs_np_[v] = sdfv[0, 0].cpu().numpy()
+            with torch.no_grad():
+                gt_v = trainer.ss_dec(x_0v).float()
+                hand_v = trainer.ss_dec(posv["x0_hand"]).float()
+            # no-prior twin of each frame: the per-frame trajectory delta
+            # (frame_t minus frame_t_noprior) isolates the integration gain
+            # from per-view difficulty (views are scored in their own grids).
+            traj_np.append(sdf_metrics(sdfv, hand_v, posv["touch"], gt_v))
 
         def to_ref(d):
             return {v: (d[v] if v == ref else warp_sdf(d[v], metas[v], metas[ref]))
@@ -214,6 +222,7 @@ def main():
                 push(arm, {k2: torch.tensor(v) for k2, v in m.items()})
         for t in range(K):
             push(f"frame_{t+1}", traj[t])
+            push(f"frame_{t+1}_noprior", traj_np[t])
         push("gt_floor", sdf_metrics(gt_ref, hand_ref, touch_ref, gt_ref))
 
         n_done += 1
