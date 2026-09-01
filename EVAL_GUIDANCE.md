@@ -1180,3 +1180,23 @@ deployment claim on real captures is closed.
 **Ops**: precompute DONE (19,259 instances, 113 GB, 2 known-gap failures);
 warm stage-2 queued (657 afterany:654); cells 2/3/4 mid-segment-1/2, healthy
 (no NaN); cell-8 distill_mse 0.039→ falling below parent's 0.044.
+
+**Readout battery PRE-QUEUED (2026-09-01, jobs 663-672, fills the l40s
+submit quota).** Stage-2 transition VERIFIED clean (657: prior_source=student,
+resumed@32k, distill_mse 0.0378→0.0375 across the boundary, 0.0369@43k).
+Streaming harness smoke-tested (61s/2 groups; early tells on the immature
+29k ckpt: prior helps the direct output single 0.838→stream_final 0.850 IoU;
+stream_median < ringbuffer_median — §7.13's independence law applies to
+prior-conditioned outputs too → deployment arm = stream_final, never
+stream+fusion). Battery map (all pinned ckpts):
+- ready now: 663/664 = cell 6 (vft113k@+16k) ab+fusion [MISSED Sat — caught];
+  665/666 = cell 8 (warmP4@+16k stage-1 ckpt) ab+streaming.
+- after 658: 667/668 = cell 2 (p4scr@48k) ab+streaming.
+- after 659: 669/670 = cell 3 (vscr@48k) ab+fusion.
+- after 660: 671/672 = cell 4 (pvscr@48k) ab+streaming.
+- THURSDAY (quota frees): post-stage-2 warm P4 deployment eval — streaming
+  with its final ckpt (after 662, ends Wed ~21:45) — the §7.19 headline arm.
+Readout Thu: assemble the 2×2×2 table (a/b single rows are the copy-shortcut
+check for P+ cells: prior-less cond ⇒ exact single-view mode) + stream_final
+vs ringbuffer at equal K + per-frame delta trajectory → pick the extension
+winner (user decision).
