@@ -1200,3 +1200,38 @@ Readout Thu: assemble the 2×2×2 table (a/b single rows are the copy-shortcut
 check for P+ cells: prior-less cond ⇒ exact single-view mode) + stream_final
 vs ringbuffer at equal K + per-frame delta trajectory → pick the extension
 winner (user decision).
+
+### 7.22 Factorial first readout (2026-09-02 am, jobs 663-668): copy-shortcut CONFIRMED, warm-start empirically justified
+
+**Rung 1 (methods, from scratch) is a clean NEGATIVE: recursion-from-scratch
+LOSES to plain distillation.** Cell 2 (scratch+prior) @48k single-view: IoU
+0.469 / CD 0.1015 / contact 7.58e-3 vs A@48k 0.553 / 0.0774 / 3.41e-3 —
+despite 30% prior dropout, training from scratch WITH a prior available
+degrades single-view competence massively (−0.084 IoU, 2.2× contact). The
+copy-shortcut is real and measured. Its streaming arms inherit the weak base
+(stream_final 0.461 < A@48k's ringbuffer-equivalent 0.574 §7.11). The
+per-frame delta shows the integration mechanism itself works (+0.03..+0.08
+IoU per frame with prior vs without) — the mechanism is sound, the from-
+scratch curriculum poisons the backbone. **This converts the warm-start from
+a convenience into an empirically necessary design choice — the paper's P4
+recipe is now justified by data, not rhetoric.**
+
+**Warm regime @+16k (stage-1 ckpt, corrupted-GT priors only):**
+| arm | c_ex | IoU | CD | F@0.02 |
+|---|---|---|---|---|
+| cell5 A@113k fused K8 | −2.5e-3* | 0.667 | 0.0430 | 0.676 |
+| **cell6 vft113k@+16k fused K8** | −7.3e-4 | **0.682** | **0.0404** | **0.694** |
+| cell8 warmP4@+16k ringbuffer | −7.2e-4 | 0.670 | 0.0429 | 0.679 |
+| cell8 warmP4@+16k stream_final | 1.66e-3 | 0.656 | 0.0407 | 0.657 |
+(* from §7.20 48-group table.)
+- **NO copy-shortcut in the warm regime**: cell 8 single-view 0.628 ≈ cell 6
+  0.634 ≈ cell 5 0.633 (within noise) — warm-start + dropout preserves the
+  single-view mode exactly as designed.
+- **cell 6 (stacked visual on A@113k) is the current BEST deployment model**:
+  fused 0.682/0.0404 — the visual loss's fusion-amplified gain reproduces on
+  the longer parent (+0.015 IoU over A@113k fused).
+- stream_final does NOT yet beat the ring-buffer at +16k (0.656 vs 0.670 IoU;
+  CD it already wins 0.0407 vs 0.0429) — but this ckpt never saw real
+  self-recon priors (stage 1 only). The stage-2 verdict = jobs 673/674
+  (queued, run tonight after 662). Note deployment cost of stream_final ==
+  ring-buffer (one forward/frame each) ⇒ P4 must BEAT it, not match it.
