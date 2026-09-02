@@ -1265,3 +1265,13 @@ VALUES off the surface are what pin the scale.
 
 Pose-free fusion row = `mv_fusion_vft113k_16k_s8_posefree.json` (queued,
 --pose_from_hand): compare vs the perfect-pose 0.682/0.0404 (§7.22).
+
+**Pose-free fusion row (job 682, n=48 paired, cell-6 model): the claim
+CLOSES.** median_K8 with hand-registered poses = IoU 0.672 / CD 0.0421 /
+F@0.02 0.673 vs 0.682 / 0.0404 / 0.694 with GT poses — extrinsics-free
+fusion costs ~0.010 IoU and STILL beats the perfect-pose A@113k fusion
+(0.667) and the single-view teacher (0.607). K4: 0.650 vs 0.654. Single
+rows bit-identical (registration touches only the warps — paired sanity).
+Paper claim: "multi-view fusion requires no camera calibration: the hand
+conditioning, already rendered from proprioception, registers the views
+(0.28°/0.07 voxel/0.5% scale) at a cost of 0.01 IoU."
