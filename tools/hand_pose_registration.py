@@ -114,7 +114,7 @@ def estimate_similarity(sdf_src, sdf_dst, band=0.05, n_surf=4000, seed=0):
     t = c_s + sol.x[3:6] - a_fin * (R @ c_d)
     return a_fin, R, t, {"cost0": float(best[0]),
                          "cost": float(np.mean(np.abs(sol.fun))),
-                         "n_surf": len(surf)}
+                         "n_surf": len(pts)}
 
 
 def warp_sdf_affine(sdf_src, a, R, t, cval=1.0):

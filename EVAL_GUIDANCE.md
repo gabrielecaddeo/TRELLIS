@@ -1235,3 +1235,33 @@ recipe is now justified by data, not rhetoric.**
   self-recon priors (stage 1 only). The stage-2 verdict = jobs 673/674
   (queued, run tonight after 662). Note deployment cost of stream_final ==
   ring-buffer (one forward/frame each) ⇒ P4 must BEAT it, not match it.
+
+### 7.23 Pose-free fusion: hand-volume registration (user idea, 2026-09-02) — VALIDATED
+
+**The hand conditioning volume is its own calibration object.** Within a
+grasp the hand is rigid and each view carries its COMPLETE hand SDF (from
+FK, not the camera), so the view->ref similarity is recoverable by
+registering the two fields — no metas, no camera extrinsics.
+`tools/hand_pose_registration.py`: scale init from interior-volume ratio,
+PCA init (4 proper sign combos), then least-squares on **SDF value-matching**
+residuals sdf_src(T(x))/a − sdf_dst(x) over the smooth outside shell
+(sdf ∈ (−0.03, 0.5), grid-boundary margin excluded).
+
+Validation (job 681, 60 pairs, Leap_Hand_test, vs GT metas):
+**rotation 0.28° mean / translation 0.07 voxel / scale 0.48% — GT-object
+warp IoU 0.964 vs 0.970 with perfect poses** (Δ0.006). Well inside the P4
+pose-jitter training envelope (±3°/±0.02/±3%) ⇒ the whole fusion/streaming
+stack tolerates estimated poses by construction. Rig implication:
+extrinsics-free multi-view — the robot hand (proprioception) continuously
+calibrates the cameras.
+
+Debugging record (methods footnote): a zero-set-only |sdf| residual has a
+systematic ~4-5% SCALE SHRINK BIAS — hand SDFs truncate inside (~−0.08) but
+grow unbounded outside, so shrinking into the interior is cheap (diagnostic
+job 678: cost@GT > cost@shrunken-estimate; monotone in scale). Symmetrizing
+the clamp does NOT fix it (zero set = thin fingers, scale ~unobservable —
+hand GT→GT warp IoU is only 0.91-0.95 even with GT poses, §7.9). The field
+VALUES off the surface are what pin the scale.
+
+Pose-free fusion row = `mv_fusion_vft113k_16k_s8_posefree.json` (queued,
+--pose_from_hand): compare vs the perfect-pose 0.682/0.0404 (§7.22).
