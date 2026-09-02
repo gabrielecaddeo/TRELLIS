@@ -84,6 +84,11 @@ def main():
     ap.add_argument("--band", type=float, default=0.15)
     ap.add_argument("--guidance_skip", type=int, default=5)
     ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--pose_from_hand", action="store_true",
+                    help="ESTIMATE the view->ref similarity by registering the "
+                         "decoded hand CONDITIONING volumes (no metas/extrinsics "
+                         "— tools/hand_pose_registration.py) instead of using "
+                         "the GT meta poses. The pose-free fusion arm.")
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
@@ -203,11 +208,23 @@ def main():
 
         # ---- warp every view's prediction into the ref grid; visibility in own grid ----
         warped, warped_vis = {}, {}
+        ref_bi = views.index(ref)
         for bi, v in enumerate(views):
             pred_np = sdf_pred[bi, 0].cpu().numpy()
             vis = hand_visibility(sdf_hand[bi, 0].cpu().numpy())
             if v == ref:
                 warped[v], warped_vis[v] = pred_np, vis
+            elif args.pose_from_hand:
+                from hand_pose_registration import estimate_similarity, warp_sdf_affine
+                est = estimate_similarity(sdf_hand[bi, 0].cpu().numpy(),
+                                          sdf_hand[ref_bi, 0].cpu().numpy())
+                if est is None:  # degenerate hand volume: fall back to GT pose
+                    warped[v] = warp_sdf(pred_np, metas[v], metas[ref])
+                    warped_vis[v] = np.clip(warp_sdf(vis, metas[v], metas[ref], cval=0.0), 0.0, 1.0)
+                else:
+                    a_e, R_e, t_e, _ = est
+                    warped[v] = warp_sdf_affine(pred_np, a_e, R_e, t_e)
+                    warped_vis[v] = np.clip(warp_sdf_affine(vis, a_e, R_e, t_e, cval=0.0), 0.0, 1.0)
             else:
                 warped[v] = warp_sdf(pred_np, metas[v], metas[ref])
                 warped_vis[v] = np.clip(warp_sdf(vis, metas[v], metas[ref], cval=0.0), 0.0, 1.0)
