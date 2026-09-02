@@ -59,35 +59,59 @@ def estimate_similarity(sdf_src, sdf_dst, band=0.05, n_surf=4000, seed=0):
 
     P_s, P_d = _grid_pts(in_s), _grid_pts(in_d)
     c_s, c_d = P_s.mean(0), P_d.mean(0)
-    # PCA axes (interior points), 4 proper sign combos
+    # PCA axes (interior points); force both to proper rotations first, else
+    # all four det+1 sign combos of V_s diag V_d^T can be improper.
     _, V_s = np.linalg.eigh(np.cov((P_s - c_s).T))
     _, V_d = np.linalg.eigh(np.cov((P_d - c_d).T))
-    surf = _grid_pts(np.abs(sdf_dst) < band)
-    if len(surf) > n_surf:
-        surf = surf[rng.choice(len(surf), n_surf, replace=False)]
+    if np.linalg.det(V_s) < 0:
+        V_s[:, 0] *= -1
+    if np.linalg.det(V_d) < 0:
+        V_d[:, 0] *= -1
+    # Registration points: the surface band PLUS the smooth outside shell
+    # (sdf up to 0.5). Matching VALUES there — sdf_src(T(x)) = a*sdf_dst(x) —
+    # is what pins the scale: the zero set alone lives on the thin fingers
+    # (the noisiest structures; hand GT->GT warp IoU is only 0.91-0.95 even
+    # with perfect poses, §7.9) and leaves scale nearly unobservable.
+    # Excluded: the interior truncation region (hand SDFs saturate ~-0.08)
+    # and the grid-boundary margin (per-view wrist clipping).
+    margin = 1.0 - 3 * D
+    sel = (sdf_dst > -0.03) & (sdf_dst < 0.5)
+    pts = _grid_pts(sel)
+    vals = sdf_dst[sel]
+    keep = np.all(np.abs(pts) < margin, axis=1)
+    pts, vals = pts[keep], vals[keep]
+    if len(pts) > n_surf:
+        ii = rng.choice(len(pts), n_surf, replace=False)
+        pts, vals = pts[ii], vals[ii]
+    surf_c = pts - c_d  # centroid-centered: decorrelates scale from translation
+
+    # Value-matching residual: sdf_src(T(x))/a − sdf_dst(x), clipped for
+    # robustness. (History: a zero-set-only |sdf| residual has a systematic
+    # shrink bias from the interior truncation — diagnostic job 678 — and
+    # ~4-5% scale error however symmetrized; the field VALUES fix it.)
+    def cost_fn(R, t_off, aa):
+        s = _sample(sdf_src, (aa * (R @ surf_c.T)).T + c_s + t_off,
+                    cval=1.0 * aa) / aa
+        return np.clip(s - vals, -0.1, 0.1)
 
     best = None
     for signs in ([1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]):
         R0 = V_s @ np.diag(signs) @ V_d.T
-        if np.linalg.det(R0) < 0:
-            continue
-        t0 = c_s - a * (R0 @ c_d)
-        cost = np.mean(np.abs(_sample(sdf_src, (a * (R0 @ surf.T)).T + t0) / a))
+        cost = np.mean(np.abs(cost_fn(R0, np.zeros(3), a)))
         if best is None or cost < best[0]:
-            best = (cost, R0, t0)
-    _, R0, t0 = best
+            best = (cost, R0)
+    _, R0 = best
 
     def resid(p):
         R = _rot_from_axis_angle(p[:3]) @ R0
-        t = p[3:6]
         aa = a * np.exp(p[6])
-        return _sample(sdf_src, (aa * (R @ surf.T)).T + t) / aa
+        return cost_fn(R, p[3:6], aa)
 
-    sol = least_squares(resid, np.concatenate([np.zeros(3), t0, [0.0]]),
-                        method="trf", diff_step=1e-3, max_nfev=60)
+    sol = least_squares(resid, np.zeros(7), method="trf", loss="soft_l1",
+                        f_scale=0.02, diff_step=1e-3, max_nfev=150)
     R = _rot_from_axis_angle(sol.x[:3]) @ R0
-    t = sol.x[3:6]
     a_fin = a * np.exp(sol.x[6])
+    t = c_s + sol.x[3:6] - a_fin * (R @ c_d)
     return a_fin, R, t, {"cost0": float(best[0]),
                          "cost": float(np.mean(np.abs(sol.fun))),
                          "n_surf": len(surf)}
