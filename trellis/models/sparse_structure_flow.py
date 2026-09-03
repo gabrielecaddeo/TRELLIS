@@ -239,6 +239,12 @@ class SparseStructureFlowModelConditioned(nn.Module):
         # whose forward never added a PE to the hand tokens or the hand mask, and
         # whose state dicts have no mask_hand_pos_emb buffer.
         use_hand_pe: bool = True,
+        # P4 recursive student (EVAL_GUIDANCE.md §7.19): an extra 16³×8 prior
+        # latent (the VAE-encoded warped fusion of earlier reconstructions) is
+        # projected by a ZERO-INITIALIZED linear and ADDED to the noisy-latent
+        # tokens — step-0 behavior is exactly the prior-free student, so a
+        # warm start is a no-op until training moves the new weights.
+        use_prior: bool = False,
         share_mod: bool = False,
         qk_rms_norm: bool = False,
         qk_rms_norm_cross: bool = False,
@@ -263,6 +269,7 @@ class SparseStructureFlowModelConditioned(nn.Module):
         self.use_touch = use_touch
         self.use_encoding_hand = use_encoding_hand
         self.use_hand_pe = use_hand_pe
+        self.use_prior = use_prior
 
         self.t_embedder = TimestepEmbedder(model_channels)
         if share_mod:
@@ -281,6 +288,8 @@ class SparseStructureFlowModelConditioned(nn.Module):
         self.input_layer = nn.Linear(in_channels * patch_size**3, model_channels)
         if self.use_encoding_hand:
             self.input_layer_x0h = nn.Linear(in_channels * patch_size**3, model_channels)
+        if self.use_prior:
+            self.input_layer_prior = nn.Linear(in_channels * patch_size**3, model_channels)
 
         self.blocks = nn.ModuleList([
             ModulatedTransformerCrossBlockConditioned(
@@ -382,6 +391,12 @@ class SparseStructureFlowModelConditioned(nn.Module):
                     nn.init.constant_(attn.to_out.weight, 0)
                     nn.init.constant_(attn.to_out.bias, 0)
 
+        # Prior-latent branch must start as an exact no-op (§7.19): the
+        # _basic_init above xavier-inits it like every Linear, so re-zero here.
+        if getattr(self, 'use_prior', False):
+            nn.init.constant_(self.input_layer_prior.weight, 0)
+            nn.init.constant_(self.input_layer_prior.bias, 0)
+
     def initialize_input_layer_x0h(self) -> None:
         """
         Initialize the input layer for x0_hand with the same weights as the main input layer.
@@ -397,6 +412,16 @@ class SparseStructureFlowModelConditioned(nn.Module):
         h = h.view(*h.shape[:2], -1).permute(0, 2, 1).contiguous()
 
         h = self.input_layer(h)
+        if self.use_prior and cond.get('x0_prior') is not None:
+            pr = patchify(cond['x0_prior'], self.patch_size)
+            pr = pr.view(*pr.shape[:2], -1).permute(0, 2, 1).contiguous()
+            pr_tokens = self.input_layer_prior(pr)
+            keep = cond.get('prior_keep')
+            if keep is not None:
+                # per-sample gate: 0 = prior dropped (single-view mode) or
+                # CFG-dropped sample — the branch contributes exactly nothing
+                pr_tokens = pr_tokens * keep.view(-1, 1, 1).to(pr_tokens.dtype)
+            h = h + pr_tokens
         h = h + self.pos_emb[None]
         t_emb = self.t_embedder(t)
         if self.share_mod:
