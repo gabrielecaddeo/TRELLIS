@@ -1275,3 +1275,15 @@ rows bit-identical (registration touches only the warps — paired sanity).
 Paper claim: "multi-view fusion requires no camera calibration: the hand
 conditioning, already rendered from proprioception, registers the views
 (0.28°/0.07 voxel/0.5% scale) at a cost of 0.01 IoU."
+
+**A@177k CONTROL LAUNCHED (user requirement 2026-09-03): warm-P4's backbone
+claim needs the total-compute-matched plain extension.** Chain resumed:
+job 684 = segment 8 (self-chains to 11, ~+70k → ~183k). Matched readouts:
+PRIMARY at 165k total (A@165k = explicit step0165000 after 3 segments,
+Sunday; vs warmP4 +52k = step0052000, evals queued: 685 a/b + 686 streaming);
+optionally 177k Monday. DANGER re-armed: outputs/distill_teacherv2 is
+TRAINING AGAIN — never latest_ema on it; explicit steps only. STOP_CHAIN
+cancels segments once verdicts land. Note warmP4-final (+64k) single-view
+0.647/5.6e-4 is consistent with the plain-extension trend on IoU (~0.65
+projected @177k) but ~2× ahead on physics — the matched control decides
+whether the P4 recipe adds backbone value beyond training time.
