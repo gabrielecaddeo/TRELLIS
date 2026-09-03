@@ -1,0 +1,5 @@
+DEPLOYED MODEL FROZEN 2026-09-03 (user decision): denoiser_ema0.9999_step0064000.pt
+= A@113k + 64k steps of the P4 recipe (stage-1 corrupted-GT priors 32k ->
+stage-2 self-recon priors 32k, visual losses, 30% prior dropout).
+Streaming stream_median (n=48): IoU 0.724 / CD 0.0342 — beats the teacher's
+K8 fusion ceiling. Do not resume this chain; later ckpts do not exist.

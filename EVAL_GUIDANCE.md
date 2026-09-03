@@ -1303,3 +1303,12 @@ fusion now STACK. Per-frame integration delta: +0.062 @frame2 → +0.089
 student @1.8 Hz whose fused estimate surpasses its 757M teacher's offline
 fusion ceiling. Pending: A@165k matched control (backbone claim, Sunday);
 pose-free penalty (~0.01, §7.23) applies to the warps identically.
+
+**DEPLOYED MODEL FROZEN (user decision 2026-09-03): warm-P4 final,
+`outputs/p4_recursive/ckpts/denoiser_ema0.9999_step0064000.pt`**
+(FROZEN_STUDENT.txt + STOP_CHAIN written; no extension). Freeze-week battery
+launched: 688 = full-set n=351 streaming eval; 689→690 = dex chain (tag
+wp4fin — inference-repo model gained the inert prior channel, commit
+8e181f7); 684-686 = A@165k matched control (Sunday, backbone claim). Then:
+writing. Remaining rows after these: none required — pose-free penalty
+quoted from §7.23.
