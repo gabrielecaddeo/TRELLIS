@@ -79,6 +79,13 @@ def main():
     if hasattr(dataset, "prior_dropout"):
         dataset.prior_dropout = 1.0  # harness builds its own priors; dataset's are unused
 
+    if args.ckpt == "latest_ema":
+        import glob
+        cands = sorted(glob.glob(os.path.join(args.model_dir, "ckpts", "denoiser_ema*.pt")))
+        assert cands, f"no EMA ckpts in {args.model_dir}/ckpts"
+        args.ckpt = os.path.basename(cands[-1])
+        print(f"latest_ema resolved to {args.ckpt}")
+
     model = getattr(models, cfg.models.denoiser.name)(**cfg.models.denoiser.args).cuda()
     state = torch.load(os.path.join(args.model_dir, "ckpts", args.ckpt),
                        map_location="cuda", weights_only=True)
