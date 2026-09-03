@@ -1287,3 +1287,19 @@ cancels segments once verdicts land. Note warmP4-final (+64k) single-view
 0.647/5.6e-4 is consistent with the plain-extension trend on IoU (~0.65
 projected @177k) but ~2× ahead on physics — the matched control decides
 whether the P4 recipe adds backbone value beyond training time.
+
+### 7.24 STREAMING VERDICT (job 683, warm-P4 final +64k, n=48): recursion+fusion stack BEATS the teacher's fusion ceiling
+
+stream_median (median over prior-conditioned streamed outputs) = **IoU 0.724 /
+CD 0.0342 / F@0.02 0.733 / EMD 0.0500** — beats ringbuffer (0.697/0.0389),
+cell 6 (0.682/0.0404), and the TEACHER's own K8 ceiling (0.713/0.0358, §7.11)
+at identical deployment cost (one forward/frame + the same median op).
+stream_final alone still trails ringbuffer (0.673 vs 0.697). KEY REVERSAL vs
+stage-1 (+16k: stream_median 0.666 < ringbuffer 0.670): stage-2 training on
+REAL self-recon priors taught prior exploitation without collapsing output
+diversity — the independence the median needs survives, so recursion and
+fusion now STACK. Per-frame integration delta: +0.062 @frame2 → +0.089
+@frame8, monotone (the demo figure). Deployed pipeline claim: 220M streaming
+student @1.8 Hz whose fused estimate surpasses its 757M teacher's offline
+fusion ceiling. Pending: A@165k matched control (backbone claim, Sunday);
+pose-free penalty (~0.01, §7.23) applies to the warps identically.
