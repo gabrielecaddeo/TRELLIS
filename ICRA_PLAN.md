@@ -83,41 +83,16 @@ voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
 
 ## Execution order (remaining)
 
-1. DONE 2026-08-26: student decision = A@81k (§7.16); A81k paired fusion
-   (§7.17, thesis passes); visual loss validated+implemented+launched (§7.18).
-2. 2026-08-27/28: read visual-ft (616) vs A-extension (610/612 → ~114k) vs
-   B-extension (611/613 → ~64k) — triple comparison, paired a/b + fusion.
-3. DONE 2026-08-26 (job 599): A@81k full-set (n=351) fusion @8 — §7.17 thesis
-   holds at scale on IoU/F@0.02/NC/contact; CD ties, EMD worse (honest caveat
-   recorded in §7.17). Redo only if a later ckpt replaces A@81k.
-4. P3: batch-K bf16 latency — bench_latency.py EXTENDED with --batch_k
-   (K views in one forward, per-K cond encode/flow/decode); job 617 queued
-   (afterany:616, runs Thu eve on H200): teacher + A(8×2) + B(8×4) archs,
-   steps 25/8/4 × K 1/2/4/8 bf16 → latency_h200_batchK_bf16.json. Latency is
-   arch-only, so valid whatever ckpt the triple comparison picks. Then the
-   frontier table + operating point.
-5. Real-capture confirmation: chosen student dex rows (convert via the
-   parity-tested port teacher_v2_port/convert_teacher_v2.py — NOTE it must be
-   generalized for the student arch; ICP canonical flags) + rig latency demo
-   (user to arrange rig access — without it, target a workshop).
-6. P4 / learned-aggregator if time allows (user decision).
-
-## Future work (paper note, agreed with user 2026-08-27)
-
-**Token count is the fifth frontier axis** — the un-spent latency lever. All
-flow cost scales with the N=4096 latent tokens (attention N², rest N); the
-§7.20 bench shows kernels are throughput-bound at batch 1, so ONLY fewer
-tokens (or fewer steps) buys real speed now. Two tiers:
-- **Patch-2 student (cheap, future work / rebuttal ammunition)**: patch_size 2
-  tokenizes the SAME 16³×8 latent into 8³=512 tokens — same VAE, same dataset
-  latents, same frozen teacher; only the student retrains (existing
-  distillation machinery). Est. 4–6× on flow → ~0.1 s/frame ≈ 10 Hz. Named in
-  the paper as future work; NOT needed for the current claims (1.8 Hz already
-  beats the §7.8 ~1 Hz target).
-- **Smaller latent (8³)**: ~8–60× flow speedup but retrains the ENTIRE stack
-  (VAE + re-encoded latents + flow) and risks the VAE reconstruction bound
-  becoming the accuracy floor (16³ is already 4×/axis compression of the 64³
-  SDF). Out of scope for this paper.
+1. DONE through 2026-09-04: measurement program CLOSED (§7.1–§7.25).
+   Deployed model FROZEN = warm-P4 +64k (streaming 0.721 IoU n=351 beats
+   teacher ceiling; dex 0.0295 best-in-campaign; pose-free −0.01).
+2. Sunday: A@165k matched control lands → §7.26 backbone-claim wording →
+   STOP_CHAIN. Last number of the campaign.
+3. WRITING (now): skeleton from EVAL_GUIDANCE §7; figures/tables listed in
+   NEXT_SESSION_PROMPT; framing rules there are binding.
+4. Rig decision (user): live demo section vs workshop framing.
+5. Post-deadline: smaller-latent VAE (user, other cluster) → patch-2/8³
+   re-distillation; B@113k question; learned aggregator.
 
 ## Open questions for the user
 - Rig access / camera setup timeline (the latency demo on live captures is the
