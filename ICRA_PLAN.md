@@ -94,6 +94,23 @@ voxel) and `tools/multiview_fusion_eval.py` (+ `force_view` dataset hook).
 5. Post-deadline: smaller-latent VAE (user, other cluster) → patch-2/8³
    re-distillation; B@113k question; learned aggregator.
 
+## Future work (paper note, agreed with user 2026-08-27)
+
+**Token count is the fifth frontier axis** — the un-spent latency lever. All
+flow cost scales with the N=4096 latent tokens (attention N², rest N); the
+§7.20 bench shows kernels are throughput-bound at batch 1, so ONLY fewer
+tokens (or fewer steps) buys real speed now. Two tiers:
+- **Patch-2 student (cheap, future work / rebuttal ammunition)**: patch_size 2
+  tokenizes the SAME 16³×8 latent into 8³=512 tokens — same VAE, same dataset
+  latents, same frozen teacher; only the student retrains (existing
+  distillation machinery). Est. 4–6× on flow → ~0.1 s/frame ≈ 10 Hz. Named in
+  the paper as future work; NOT needed for the current claims.
+- **Smaller latent (8³×16)**: IN PROGRESS on the user's other cluster
+  (2026-09-03: VAE retrain at channels [32,128,512,512], latent_channels 16,
+  data_pose_norm loader fix, sdf metadata column). GO/NO-GO gate on return:
+  reconstruction contact-floor vs current ~0.011; then re-encode latents +
+  re-distill (post-deadline).
+
 ## Open questions for the user
 - Rig access / camera setup timeline (the latency demo on live captures is the
   centerpiece for ICRA vs workshop).
