@@ -1312,3 +1312,23 @@ wp4fin — inference-repo model gained the inert prior channel, commit
 8e181f7); 684-686 = A@165k matched control (Sunday, backbone claim). Then:
 writing. Remaining rows after these: none required — pose-free penalty
 quoted from §7.23.
+
+### 7.25 Freeze-week battery COMPLETE (2026-09-04, jobs 685/686/688/689/690)
+
+**Full-set n=351 streaming (688) — §7.24 confirmed at scale**: stream_median
+0.721/0.0399/EMD 0.0624 vs teacher K8 0.716/0.0427/0.0710 — the frozen
+streaming student beats the teacher's fusion ceiling on IoU, CD AND EMD at
+full set (F@0.02 0.699 vs 0.716 = the one metric under; quote honestly).
+stream_final 0.683/0.0430 (beats teacher single 0.605/0.0586 massively at
+one forward/frame). Per-frame delta: +0.061 @2 → +0.109 @8. All arms'
+contact below floor, including prior-dropped single.
+
+**Dex n=989 (689/690, canonical ICP): frozen model = best real-capture model
+of the campaign, single-image prior-less mode**: CD² 0.0295/0.0104 (teacher
+0.0336/0.0112, −12%; A@113k 0.0307/0.0110), NC 0.841/0.885 (best). The P4
+recipe improved the raw single-view backbone on real data.
+
+**Matched +52k rows banked (685/686)**: single 0.641/c_ex 5.3e-4,
+stream_median 0.710/0.0356. Awaiting A@165k (Sunday, 687→691) for the
+backbone-claim wording. MEASUREMENT PROGRAM COMPLETE otherwise — writing
+begins.
