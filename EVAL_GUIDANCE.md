@@ -1332,3 +1332,33 @@ recipe improved the raw single-view backbone on real data.
 stream_median 0.710/0.0356. Awaiting A@165k (Sunday, 687→691) for the
 backbone-claim wording. MEASUREMENT PROGRAM COMPLETE otherwise — writing
 begins.
+
+### 7.26 FINAL MEASUREMENT — matched-compute backbone verdict (jobs 693/694, 2026-09-07): the P4 recipe trades single-view for streaming
+
+At MATCHED 165k total steps (A@165k plain vs warm-P4@+52k):
+
+| single-view @8 (n=64 ds1337) | c_ex | hit1v | IoU | CD | F@0.02 |
+|---|---|---|---|---|---|
+| **A@165k plain** | **3.61e-4** | **0.723** | **0.663** | **0.0519** | **0.597** |
+| warm-P4@+52k | 5.27e-4 | 0.712 | 0.641 | 0.0594 | 0.572 |
+
+| streaming (n=48) | IoU | CD |
+|---|---|---|
+| A@165k ring-buffer (its best) | 0.691 | 0.0388 |
+| **warm-P4 stream_median** | **0.710** | **0.0356** |
+
+**Verdict (my §7.25-era prediction was WRONG on both halves): plain extension
+BEATS the P4 recipe on the single-view backbone at matched compute (IoU
++0.022, CD −13%, physics too), and the P4 recipe beats plain+ring-buffer on
+streaming (+0.019 IoU, −8% CD).** The recipe does not improve the backbone —
+it converts ~0.02 single-view IoU into ~0.02 streaming IoU. Honest paper
+claim: "learned integration beats post-hoc fusion at equal total compute, at
+a measurable single-view cost; the deployed model chooses streaming."
+Corollaries: (i) A@165k = the campaign's best single-view student (0.663 —
+supersedes warmP4-final's 0.647, which reflected A's shorter training);
+(ii) §7.25's "P4 recipe improved the raw backbone (dex)" attribution is now
+SUSPECT — dex for A@165k queued (jobs above) to settle it; (iii) sanity:
+plain model's stream_final == single (no prior channel) ✓. Deployed model
+UNCHANGED (frozen warm-P4: streaming is the deployment mode). A-chain
+STOPPED at ~174.5k (overnight overrun; free ~177k matchpoint ckpts exist if
+ever needed). MEASUREMENT PROGRAM NOW CLOSED except the dex attribution row.
