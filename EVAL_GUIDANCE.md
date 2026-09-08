@@ -1376,3 +1376,100 @@ wp4 (deployed, streaming). MEASUREMENT PROGRAM FULLY CLOSED — §7.26 was the
 last controlled comparison, this row the last attribution. (Possible reopen:
 dex-full multi-view copy in progress, user-driven — would add REAL-CAPTURE
 streaming rows, 8 frames/grasp, view_groups.json manifest present.)
+
+### 7.27 dex-full REAL-CAPTURE multi-view: conventions, validation, smoke (2026-09-08, jobs 697-712)
+
+**Export layout (`/projects/gcaddeo/inference/TRELLIS/dex-full/`, 508,384
+instances = 63,548 groups × 8 cameras, 10 subjects, 1000 sequences, 20 YCB
+objects; `view_groups.json` key subject|date|time|frame).** Every instance is
+ONE frame (f000: `000.png` 512² RGBA crop, `000_mask1.png` hand,
+`000_mask2.png` object, `meta.json`, meshes; `data_pose_norm/<I>/` with
+`_f000_meta.json`, sdfs/idxs/contacts). The 8 "frames" of a grasp are the 8
+SIMULTANEOUS DexYCB cameras (manifest note; instance names differ only in the
+camera serial), i.e. 8 separate instances, NOT 8 views inside one instance.
+Same per-instance layout as the old single-view export
+(`dex-dataset-total-total`) — no `transforms.json`, no `metadata.csv`, mask
+names `000_mask1.png` (train mixin wants `000_mask_1.png`).
+
+**Pose block = NOT usable for warps.** All 8 metas carry `R_fixed = I`,
+`t_aug = (0,0,tz)`, per-camera `s_aug` (0.59-0.95): the meshes are in EACH
+CAMERA'S OWN frame (pyrender convention, `coordinate_convention` in
+meta.json) and the similarity only normalizes hand+object into unit2. The
+DexYCB extrinsics are not in the export. Meta-warp GT->GT across cameras:
+object IoU 0.00-0.10 (= identity). **Hand registration (§7.23) is the ONLY
+path on real captures** — GT->GT sweep, 60 benchmark groups × 7 pairs (GT
+hand fields, `tools/hand_pose_registration.py`): object IoU mean 0.925 /
+median 0.961 (p25 0.916, p95 0.985), hand IoU 0.948, band |Δsdf| 0.005
+(synthetic §7.9 with GT poses: 0.94-0.97 / 0.003), real inter-camera
+rotations 43°-165° (p5-p95). Tail: 7.6% of pairs < 0.8 IoU, 1.9% < 0.6,
+concentrated in a few subject-05 sequences (150859/150640: all pairs ~0.5 —
+suspect label/mesh quality, to inspect). Zero degenerate registrations.
+
+**Completeness.** All 508,384 instances have meta + sdfs + contacts (the
+full stat sweep is in the scratchpad; sampled 3000 groups: 0 missing
+members). Renders are missing for ~0.55% of instances (stage-1 gap: mesh
+dir without PNG/masks, absent from `processing_results.csv`) — 16 of the
+3632 benchmark instances, 15/454 benchmark groups. `n_contacts = 0` in 29%
+of instances (mean 121) — contact metrics on dex-full weight only
+instances with contacts. No `metadata.csv`/`transforms.json` anywhere.
+
+**Benchmark groups = the old n=994 single-view frames, all 8 cameras.** The
+994 old instances map 1:1 onto dex-full groups (454 distinct (seq, frame)
+pairs; the old set already had 60 sequences from all 8 cameras). Files:
+`dex-full/benchmark_groups.json` (+ `benchmark_instances.txt`); camera
+order = sorted serials `['836212060125','839512060362','840412060917',
+'841412060263','932122060857','932122060861','932122061900','932122062010']`
+= views 0..7 everywhere.
+
+**Latents (`create_latents_dex_full.py`, inference repo; now `--instances_file`,
+`create_latents_dex_full.sbatch <rank> <world> [file]`, `--frames 1` since
+one frame/instance; EMA encoder step0300000 strict, like training).** Job
+697: 3632 benchmark instances, 0 failures, 25 inst/s. Full set: shards
+709-712 (4 × ~127k, ~1.4 h each, 2 concurrent on l40s; ~120 KB/file → ~120 GB).
+
+**Harness path = train-convention symlink dataset `dex-full-groups/`
+(`tools/build_dexfull_groups.py`, idempotent):** one instance per group
+(`<obj>__<subject>__<time>__f<frame>`), views 0..7 symlinked to the camera
+instances (images, masks renamed `_mask_1/_mask_2`, metas, sdfs, contacts,
+latents `<G>_<v>__{object,hand}.npz`), synthetic `transforms.json` (frames
+only, no camera matrices), `metadata.csv` (cond_rendered False for the 15
+groups with a missing camera → 439 usable groups). Harness changes:
+`streaming_eval.py --pose_from_hand` (every warp — prior into the current
+view, outputs into the ref grid — from decoded-hand registration, pairwise
+cache; `meta.registration` reports pairs/fallbacks/cost) and
+`--dump_meshes DIR` (canonical `<arm>/<inst>/00/sample.ply` layout, the dex
+eval's YCB-code regex accepts the group names); wrappers
+`tools/{streaming_eval,multiview_fusion_eval}_dexfull.sbatch` (l40s).
+Conditioning parity with the n=989 rows verified: the inference-repo
+`test_dataset` used the CLEAN object mask (its ablation branch is dead code).
+
+**Smoke (jobs 703/708, 4 groups, frozen wp4, 8 steps, pose-free), in-grid
+metrics vs posed GT in the ref camera's grid:**
+
+| arm | IoU | CD | F@0.02 | EMD |
+|---|---|---|---|---|
+| single (ref cam, no prior) | 0.840 | 0.0456 | 0.556 | 0.0621 |
+| ringbuffer_median (8 no-prior outputs) | 0.850 | 0.0442 | 0.633 | 0.0668 |
+| stream_final (8th frame, own priors) | 0.872 | 0.0380 | 0.633 | 0.0579 |
+| **stream_median** | **0.887** | **0.0349** | **0.716** | **0.0569** |
+| fusion median_K8 (job 703, views 0-7) | 0.855 | 0.0429 | 0.643 | 0.0629 |
+
+Per-frame streamed vs no-prior IoU: 0.794/0.794, 0.740/0.564, 0.840/0.737,
+0.835/0.761, 0.794/0.720, 0.845/0.747, 0.847/0.801, 0.872/0.840 — positive
+integration delta at every frame after the first (+0.03 to +0.18), the
+synthetic §7.25 story reproduced on real captures. Registration: 112 pairs,
+0 fallbacks, cost 0.012. Absolute IoU is higher than synthetic (0.72) —
+these 4 groups are two easy objects (master-chef can, cracker box); not a
+number to quote. Runtime: streaming ~20 s/group, fusion ~15 s/group on L40S.
+
+**Proposed full runs (user approval pending, all l40s, ~439 groups):**
+(a) frozen wp4 streaming pose-free + mesh dump (~2.5 h); (b) frozen wp4
+fusion ladder K1/2/4/8 pose-free (~2 h); (c) teacher fusion K8 pose-free
+(real-capture fusion ceiling, ~3 h); (d) A@165k ring-buffer streaming
+(matched-compute plain-student baseline, §7.26 analog, ~2.5 h); (e)
+canonical ICP dex eval (CPU) on the dumped single/stream_final/
+stream_median meshes → the real-capture streaming table in the paper's
+canonical metric, same 439 frames as the single-image rows (per-instance
+CSVs `summary_*_dex_total_total_icp.csv` allow a same-frame restriction).
+Optional: ask for DexYCB `calibration/extrinsics_*` (a few KB) → true GT
+inter-camera poses → GT-vs-registered comparison on real data (§7.23 analog).

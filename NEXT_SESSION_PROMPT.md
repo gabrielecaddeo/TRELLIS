@@ -3,7 +3,7 @@
 Read ICRA_PLAN.md and EVAL_GUIDANCE.md §7 (the LIVE results ledger, §7.1–§7.26,
 COMPLETE) before doing anything. TEACHER_RETRAIN.md is historical only.
 
-## State as of 2026-09-08 — MEASUREMENT PROGRAM FULLY CLOSED (§7.1–§7.26 + dex attribution); WRITING + dex-full real-capture multi-view
+## State as of 2026-09-08 (evening) — §7.1–§7.27; dex-full real-capture multi-view SMOKE PASSED, full runs proposed; WRITING
 
 **DEPLOYED MODEL FROZEN (user decision 2026-09-03): warm-P4 final**
 `outputs/p4_recursive/ckpts/denoiser_ema0.9999_step0064000.pt`
@@ -50,40 +50,37 @@ NOT change on the frozen model; new latents (dex-full) use EMA like training.
   a reviewer asks). THREE dirs dangerous for latest_ema: teacher,
   distill_teacherv2, p4_recursive.
 
-## NEW TOP TASK: dex-full — REAL-CAPTURE multi-view (8 frames/grasp)
+## TOP TASK: dex-full — REAL-CAPTURE multi-view (8 simultaneous cameras/grasp) — SMOKE PASSED 2026-09-08 (§7.27)
 
-User is copying the FULL DexYCB export to
-`/projects/gcaddeo/inference/TRELLIS/dex-full/` (in progress; currently
-stage1_meshes=renders_cond, stage2_sdf=data_pose_norm — user renames after
-copy — plus logs/, supervise_build.sh, view_groups.json manifest). Exactly
-8 frames per object/hand pose. PRIZE: moves the streaming/fusion claims to
-REAL captures (possibly pose-free) — supersedes the rig-gap concern.
+State: export inspected, conventions settled, latents running, harnesses
+validated. READ §7.27 first. Key facts (do not rediscover):
+- dex-full = 508,384 single-frame instances; a grasp's 8 "frames" are the 8
+  SIMULTANEOUS DexYCB cameras (8 instances tied by view_groups.json), same
+  per-instance layout as the old single-view export.
+- Metas have R_fixed=I for every camera (camera-frame SDFs; no extrinsics in
+  the export) → META-WARPS ARE INVALID on dex-full (IoU ~0). ALWAYS
+  `--pose_from_hand` (hand registration, §7.23): GT->GT object IoU median
+  0.961 on real groups. Never quote a dex-full "GT pose" row — there is none.
+- Harness data root: `/projects/gcaddeo/inference/TRELLIS/dex-full-groups/`
+  (symlink dataset from `tools/build_dexfull_groups.py`; 454 benchmark groups
+  = the old n=994 single-view frames × 8 cameras; 439 usable — 15 groups have a
+  camera without renders). view v = camera CAMS[v] (sorted serials, see
+  groups_manifest.json). Wrappers `tools/streaming_eval_dexfull.sbatch`,
+  `tools/multiview_fusion_eval_dexfull.sbatch` (l40s).
+- Latents: benchmark set DONE (job 697, 0 failures); full 508k set = shards
+  709-712 (check `squeue`; rerun `create_latents_dex_full.sbatch <r> 4` with
+  --skip_existing if any died). Re-run build_dexfull_groups.py with a groups
+  file covering more groups if a bigger real-capture set is wanted.
+- Smoke (4 groups, frozen wp4, pose-free): stream_median IoU 0.887 / CD 0.0349
+  vs single 0.840 / 0.0456; positive per-frame integration delta on every
+  frame. Fusion median_K8 0.855 / 0.0429. Streaming ~20 s/group, fusion ~15 s.
 
-Plan when the user confirms the copy is done:
-1. Inspect `view_groups.json` + one instance: metas must have the `pose`
-   block (similarity convention) for meta-warps — if absent/different, use
-   the HAND-REGISTRATION path (§7.23, tools/hand_pose_registration.py:
-   meta-free, validated 0.28°/0.07vox/0.48%; fusion cost ~0.01 IoU).
-2. Completeness checklist (train-repo dataset class needs ALL of):
-   metadata.csv (sha256, aesthetic_score, cond_rendered,
-   ss_latent_vae_final_all_resume_2_0300000 cols); renders_cond/<inst>/
-   transforms.json + images + NNN_mask_1.png (hand) + NNN_mask_2.png (obj);
-   data_pose_norm/<inst>/<inst>_fNNN_meta.json (+ pose2d_meta);
-   contacts/<inst>_fNNN_{contact_coords,dist_to_contact}.npy (REQUIRED by
-   get_instance — verify dex-full has them!); sdfs/<inst>_fNNN__{object,hand}.npy.
-3. Latents: `/projects/gcaddeo/inference/TRELLIS/create_latents_dex_full.py`
-   (COMMITTED, FIXED version — all 8 frames, train-convention names
-   {instance}_{v}__{object,hand}.npz, strict EMA-encoder
-   encoder_ema0.9999_step0300000 = same as training latents; the OLD
-   create_latents_dex.py is f000-only with broken _f00__ names — do not use).
-   Run via sbatch gpu-l40s; shardable --rank/--world_size; --skip_existing.
-4. Smoke: streaming_eval + fusion on ~4 dex-full groups (views 0-7 →
-   --views "1,2,3,4,5,6,7,0" streaming / "0,...,7" fusion; adjust k_subsets
-   "1:0;2:...;4:...;8:0,...,7"). Watch: frame ordering semantics (are the 8
-   frames simultaneous multi-cam or temporal?), meta warp validity (GT->GT
-   hand warp check like §7.9), grid/scale conventions.
-5. Full runs: frozen wp4 streaming + fusion (+ pose-free variant) on all
-   dex-full groups → the paper's real-capture streaming table.
+NEXT (needs the user's go): the full runs listed at the end of §7.27
+(wp4 streaming + fusion ladder, teacher fusion K8, A@165k ring-buffer,
+canonical ICP eval on dumped meshes). Then the paper's multi-view/streaming
+claims move to REAL captures (pose-free), rig demo becomes nice-to-have.
+Open: inspect the subject-05 sequences with ~0.5 registration IoU; optionally
+ask the user for DexYCB calibration/extrinsics_* to get true GT camera poses.
 
 ## The writing phase (the actual work now)
 
@@ -98,9 +95,10 @@ Paper skeleton = the ledger. Framing rules accumulated (MUST follow):
   1 teacher forward" only vs teacher@25; lead with streaming 1.8 Hz.
 - Copy-shortcut negative justifies warm-start; zero-init graft = the
   method's own lineage (hand conditioning was added the same way).
-- Dex = single-view real-capture validation; multi-view/streaming =
-  synthetic held-out UNLESS dex-full lands (then real-capture streaming
-  rows supersede; rig demo becomes nice-to-have).
+- Dex = single-view real-capture validation; multi-view/streaming rows on
+  REAL captures are coming from dex-full (§7.27, pose-free only — no GT
+  camera poses exist there); synthetic held-out rows remain the GT-pose
+  reference.
 - Token count = 5th-axis future work (patch-2 student ≈10 Hz, ICRA_PLAN).
 - EMD/F@0.02 caveats quoted wherever they apply. Mesh evals ICP canonical.
 
@@ -131,6 +129,6 @@ If it passes → patch-2/8³ re-distillation = post-deadline work.
   TRAINING → gpu-h200; dependency chains for must-run steps.
 - Ask user before ≥ multi-day GPU. Git: commit locally, USER pushes (train
   repo main; inference repo local main ahead of origin → push to a BRANCH).
-  PUSH BACKLOG IS LARGE (~20 commits) — remind the user.
+  PUSH BACKLOG IS LARGE (train repo ~21 commits, inference repo 8 ahead) — remind the user.
 - Open user decisions: rig access (ICRA live demo vs workshop framing —
   now the ONLY open scope question).
