@@ -31,8 +31,9 @@ from easydict import EasyDict as edict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from diagnose_physics_losses import DiagnosticTrainer  # noqa: E402
 from ab_eval_guidance import sdf_metrics  # noqa: E402
-from mesh_metrics import paired_mesh_metrics  # noqa: E402
+from mesh_metrics import paired_mesh_metrics, sdf_to_mesh  # noqa: E402
 from multiview_warp import warp_sdf  # noqa: E402
+from hand_pose_registration import estimate_similarity, warp_sdf_affine  # noqa: E402
 from trellis import models, datasets  # noqa: E402
 from trellis.pipelines import samplers  # noqa: E402
 
@@ -62,6 +63,14 @@ def main():
     ap.add_argument("--mesh_points", type=int, default=10000)
     ap.add_argument("--emd_points", type=int, default=1024)
     ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--pose_from_hand", action="store_true",
+                    help="POSE-FREE streaming (§7.23/§7.27): every warp (prior into the current "
+                         "view, outputs into the ref grid) uses a similarity registered between "
+                         "the two views' decoded HAND SDFs instead of the metas' pose block. "
+                         "Required on real captures (dex-full metas carry no inter-camera pose).")
+    ap.add_argument("--dump_meshes", default=None,
+                    help="optional dir: write <dir>/<arm>/<instance>/00/sample.ply (+ gt/) with "
+                         "the inference-repo meshing convention, for the canonical ICP dex eval")
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
@@ -121,6 +130,7 @@ def main():
           f"model_has_prior={model_has_prior}, use_prior={use_prior}")
 
     acc = {}
+    reg_stats = {"n_fallback": 0, "cost": []}
     def push(arm, m):
         for k, v in m.items():
             acc.setdefault(arm, {}).setdefault(k, []).append(
@@ -171,13 +181,35 @@ def main():
         gen = torch.Generator(device="cuda").manual_seed(args.seed * 9973 + gi)
         datas = {v: {k: packs[v][k][None] for k in TENSOR_KEYS} for v in views}
 
+        # ---- view-to-view warps: metas (synthetic GT poses) or hand registration ----
+        hands_np, reg_cache = {}, {}
+        if args.pose_from_hand:
+            with torch.no_grad():
+                for v in views:
+                    hands_np[v] = trainer.ss_dec(datas[v]["x0_hand"].cuda()).float()[0, 0].cpu().numpy()
+
+        def warp(vol, src, dst, cval=1.0):
+            if src == dst:
+                return vol
+            if not args.pose_from_hand:
+                return warp_sdf(vol, metas[src], metas[dst], cval=cval)
+            if (src, dst) not in reg_cache:
+                reg_cache[(src, dst)] = estimate_similarity(hands_np[src], hands_np[dst])
+                if reg_cache[(src, dst)] is None:
+                    reg_stats["n_fallback"] += 1
+                else:
+                    reg_stats["cost"].append(reg_cache[(src, dst)][3]["cost"])
+            est = reg_cache[(src, dst)]
+            if est is None:  # degenerate hand volume: metas (meaningless on dex-full, counted)
+                return warp_sdf(vol, metas[src], metas[dst], cval=cval)
+            return warp_sdf_affine(vol, est[0], est[1], est[2], cval=cval)
+
         # ---- streamed pass (prior from own previous outputs) ----
         outputs = {}     # view -> sdf np in own grid
         traj = []        # per-frame metrics of the direct output (own grid vs own GT)
         for t, v in enumerate(views):
             if use_prior and t > 0:
-                warped_prev = [warp_sdf(outputs[pv], metas[pv], metas[v])
-                               for pv in views[:t]]
+                warped_prev = [warp(outputs[pv], pv, v) for pv in views[:t]]
                 prior_np = (np.median(np.stack(warped_prev), axis=0)
                             if len(warped_prev) > 1 else warped_prev[0])
             else:
@@ -207,8 +239,7 @@ def main():
             traj_np.append(sdf_metrics(sdfv, hand_v, posv["touch"], gt_v))
 
         def to_ref(d):
-            return {v: (d[v] if v == ref else warp_sdf(d[v], metas[v], metas[ref]))
-                    for v in d}
+            return {v: warp(d[v], v, ref) for v in d}
         w_stream, w_plain = to_ref(outputs), to_ref(outputs_np_)
 
         fused = {
@@ -220,6 +251,13 @@ def main():
 
         rng_mesh = np.random.default_rng(args.seed * 31337 + gi)
         gt_np = gt_ref[0, 0].cpu().numpy()
+        if args.dump_meshes:
+            for arm, sdf_np in list(fused.items()) + [("gt", gt_np)]:
+                mesh = sdf_to_mesh(np.ascontiguousarray(sdf_np))
+                if mesh is not None:
+                    od = os.path.join(args.dump_meshes, arm, instance, "00")
+                    os.makedirs(od, exist_ok=True)
+                    mesh.export(os.path.join(od, "sample.ply"))
         for arm, sdf_np in fused.items():
             tsr = torch.from_numpy(np.ascontiguousarray(sdf_np))[None, None].float().cuda()
             push(arm, sdf_metrics(tsr, hand_ref, touch_ref, gt_ref))
@@ -247,7 +285,11 @@ def main():
                         "model_has_prior": model_has_prior,
                         "cfg_strength": args.cfg_strength,
                         "cfg_interval": args.cfg_interval,
-                        "rescale_t": args.rescale_t, "seed": args.seed}}
+                        "rescale_t": args.rescale_t, "seed": args.seed,
+                        "pose_from_hand": args.pose_from_hand,
+                        "registration": {"n_pairs": len(reg_stats["cost"]),
+                                         "n_fallback": reg_stats["n_fallback"],
+                                         "cost_mean": float(np.mean(reg_stats["cost"])) if reg_stats["cost"] else None}}}
     for a in acc:
         results[a] = {k2: {"mean": float(torch.stack(vv).mean()),
                            "std": float(torch.stack(vv).std())}
