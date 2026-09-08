@@ -82,12 +82,20 @@ validated. READ §7.27 first. Key facts (do not rediscover):
 - CPU work: NEVER on the login node (user directive; ulimit kills it silently)
   — `tools/dexfull_cpu.sbatch <cmd>` on partition `cpu`; scripts on shared FS.
 
-NEXT (needs the user's go): the full runs listed at the end of §7.27
-(wp4 streaming + fusion ladder, teacher fusion K8, A@165k ring-buffer,
-canonical ICP eval on dumped meshes). Then the paper's multi-view/streaming
-claims move to REAL captures (pose-free), rig demo becomes nice-to-have.
-Open: inspect the subject-05 sequences with ~0.5 registration IoU; optionally
-ask the user for DexYCB calibration/extrinsics_* to get true GT camera poses.
+FULL BATTERY LAUNCHED 2026-09-09 00:15 (user approval, l40s + h200), all
+SLURM-chained, no session needed. MORNING READOUT: read
+`outputs/diagnostics/DEXFULL_RESULTS.md` (written by summary job 741 after
+everything finishes; if it is missing/partial, run
+`sbatch tools/dexfull_cpu.sbatch python tools/dexfull/summarize_dexfull.py`
+and check `slurm-*-<id>.out`). Jobs: 723/724 wp4 streaming GT/pose-free
+(+ mesh dumps `outputs/diagnostics/dexfull_full_meshes_{gtpose,posefree}/`),
+725/726 wp4 fusion ladder, 727/728 teacher@52k fusion, 729/730 A@165k
+ring-buffer streaming, 731-740 canonical ICP evals on the dumped meshes
+(`summary_dexfull_wp4fin_<mode>_<arm>_icp.json` in the inference repo),
+718 completeness sweep. Then: write §7.28 in the ledger from the readout
+(real-capture streaming table; GT vs pose-free; same-grasp single-image
+rows are in the readout), and move the paper's streaming claims to real
+captures.
 
 ## The writing phase (the actual work now)
 
