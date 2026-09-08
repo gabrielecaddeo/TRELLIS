@@ -45,6 +45,9 @@ def main():
     ap.add_argument("--rank", type=int, default=0)
     ap.add_argument("--world_size", type=int, default=1)
     ap.add_argument("--skip_existing", action="store_true")
+    ap.add_argument("--instances_file", default=None,
+                    help="optional text file (one instance name per line): restrict to these "
+                         "instances (used to encode the benchmark groups first)")
     opt = edict(vars(ap.parse_args()))
 
     data_root = Path(opt.data_root).resolve()
@@ -61,8 +64,13 @@ def main():
     encoder.eval()
     print(f"Loaded EMA encoder (strict): {ckpt_path}")
 
-    instances = sorted(p.name for p in data_root.iterdir() if p.is_dir()
-                       and (p / "sdfs" / f"{p.name}_f000__object.npy").exists())
+    if opt.instances_file:
+        instances = sorted(set(l.strip() for l in open(opt.instances_file) if l.strip()))
+        instances = [i for i in instances
+                     if (data_root / i / "sdfs" / f"{i}_f000__object.npy").exists()]
+    else:
+        instances = sorted(p.name for p in data_root.iterdir() if p.is_dir()
+                           and (p / "sdfs" / f"{p.name}_f000__object.npy").exists())
     lo = len(instances) * opt.rank // opt.world_size
     hi = len(instances) * (opt.rank + 1) // opt.world_size
     instances = instances[lo:hi]
@@ -87,7 +95,8 @@ def main():
             row["error"] = repr(e)
         records.append(row)
 
-    csv = Path(opt.output_dir) / f"ss_latent_{latent_name}_{opt.rank}_sdf.csv"
+    tag = "bench_" if opt.instances_file else ""
+    csv = Path(opt.output_dir) / f"ss_latent_{latent_name}_{tag}{opt.rank}_sdf.csv"
     pd.DataFrame.from_records(records).to_csv(csv, index=False)
     print(f"records -> {csv}\nlatents -> {latent_dir}")
 
