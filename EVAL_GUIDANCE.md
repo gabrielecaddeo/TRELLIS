@@ -1473,3 +1473,44 @@ canonical metric, same 439 frames as the single-image rows (per-instance
 CSVs `summary_*_dex_total_total_icp.csv` allow a same-frame restriction).
 Optional: ask for DexYCB `calibration/extrinsics_*` (a few KB) → true GT
 inter-camera poses → GT-vs-registered comparison on real data (§7.23 analog).
+
+**ADDENDUM 2026-09-09 — DexYCB calibration landed: dex-full HAS GT camera
+poses after all (jobs 713-722).** `dex-full/calibration/` = per-date
+`extrinsics_<date>/extrinsics.yml` (8 serials, 3×4 row-major [R|t]
+camera→world, master 840412060917 = identity, sequence date → latest set
+≤ date), intrinsics, MANO betas. Convention resolved by composition sweep
+against the hand registration (`tools/dexfull_calib.py`): x_grid =
+s_norm·x_render + t_norm (per-instance least-squares fit of hand+object
+meshes onto their SDFs, residual 0.006), x_cam = diag(1,−1,−1)·x_render
+(pyrender flip), x_world = R_c·x_cam + t_c. Only that combination gives
+GT→GT object IoU 0.986-0.988 (the other 3 sign/direction candidates: 0.00).
+Written into the group metas as the standard pose block with canonical :=
+world frame (`build_dexfull_groups.py --gt_metas`; original export block
+kept under `pose_export`), so the harnesses' default meta-warp path IS the
+GT-pose path on real captures; `--pose_from_hand` = pose-free.
+
+Validation (cpu jobs 719/720): meta-path GT→GT over 238 pairs / 34 groups:
+object IoU mean 0.957 / median 0.970 (p5 0.849), hand 0.935, band |Δsdf|
+0.0035 — identical to synthetic §7.9. **Registration vs calibrated pose
+(280 pairs / 40 groups): rotation 0.41° mean / 0.32° median, translation
+0.18 / 0.10 voxel, scale 0.55% / 0.40% — the synthetic §7.23 numbers
+(0.28°/0.07 vox/0.48%) hold on real captures.** The <0.8-IoU tail is the
+same size with calibrated poses (7.9%) as with registration (8.9%) ⇒ it is
+in the labels/meshes, not the registration.
+
+GT-pose smoke (jobs 721/722, same 4 groups, single arms bit-identical to
+the pose-free run): stream_median 0.877 / CD 0.0367 / F 0.695 and fusion
+median_K8 0.848 / 0.0445 / 0.626 — i.e. the HAND-REGISTERED warps are
+marginally BETTER than the calibrated ones on real data (pose-free
+stream_median 0.887 / 0.0349 / 0.716; median_K8 0.855 / 0.0429 / 0.643).
+Plausible: registration aligns the model's own decoded volumes, absorbing
+the mesh-fit/calibration residuals; n=4, to be confirmed at scale. Paper
+claim upgrade: on real captures, pose-free fusion/streaming costs NOTHING
+versus calibrated cameras (was: −0.010 IoU on synthetic).
+
+Ops: login node kills these fits (ulimit -v 8 GB / RSS 200 MB, silent) —
+ALL CPU work goes through `tools/dexfull_cpu.sbatch <cmd>` on the `cpu`
+partition (user directive 2026-09-09); scripts must live on the shared FS
+(compute nodes do not see the session /tmp). Full runs (updated): each of
+(a)-(d) in BOTH pose modes (meta = GT, --pose_from_hand) → ~10 GPU-h l40s;
+the §7.23-style table on real captures comes for free from the pair.

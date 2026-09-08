@@ -57,10 +57,14 @@ validated. READ §7.27 first. Key facts (do not rediscover):
 - dex-full = 508,384 single-frame instances; a grasp's 8 "frames" are the 8
   SIMULTANEOUS DexYCB cameras (8 instances tied by view_groups.json), same
   per-instance layout as the old single-view export.
-- Metas have R_fixed=I for every camera (camera-frame SDFs; no extrinsics in
-  the export) → META-WARPS ARE INVALID on dex-full (IoU ~0). ALWAYS
-  `--pose_from_hand` (hand registration, §7.23): GT->GT object IoU median
-  0.961 on real groups. Never quote a dex-full "GT pose" row — there is none.
+- The EXPORT metas have R_fixed=I (camera-frame SDFs) — useless for warps.
+  Since 2026-09-09 the DexYCB `calibration/` folder is in dex-full and
+  `tools/dexfull_calib.py` + `build_dexfull_groups.py --gt_metas` write TRUE
+  GT pose blocks (canonical = world) into dex-full-groups, verified: meta-path
+  GT->GT object IoU median 0.970 (§7.27 addendum). So BOTH modes exist on real
+  captures: default meta warps = GT calibrated poses; `--pose_from_hand` =
+  pose-free (registration matches calibration to 0.41°/0.18 vox/0.55%; smoke
+  says pose-free is even marginally better). Run every full row in both modes.
 - Harness data root: `/projects/gcaddeo/inference/TRELLIS/dex-full-groups/`
   (symlink dataset from `tools/build_dexfull_groups.py`; 454 benchmark groups
   = the old n=994 single-view frames × 8 cameras; 439 usable — 15 groups have a
@@ -71,9 +75,12 @@ validated. READ §7.27 first. Key facts (do not rediscover):
   709-712 (check `squeue`; rerun `create_latents_dex_full.sbatch <r> 4` with
   --skip_existing if any died). Re-run build_dexfull_groups.py with a groups
   file covering more groups if a bigger real-capture set is wanted.
-- Smoke (4 groups, frozen wp4, pose-free): stream_median IoU 0.887 / CD 0.0349
-  vs single 0.840 / 0.0456; positive per-frame integration delta on every
-  frame. Fusion median_K8 0.855 / 0.0429. Streaming ~20 s/group, fusion ~15 s.
+- Smoke (4 groups, frozen wp4): pose-free stream_median IoU 0.887 / CD 0.0349
+  (GT poses 0.877 / 0.0367) vs single 0.840 / 0.0456; positive per-frame
+  integration delta on every frame. Fusion median_K8 0.855 (GT 0.848).
+  Streaming ~20 s/group, fusion ~15 s on L40S.
+- CPU work: NEVER on the login node (user directive; ulimit kills it silently)
+  — `tools/dexfull_cpu.sbatch <cmd>` on partition `cpu`; scripts on shared FS.
 
 NEXT (needs the user's go): the full runs listed at the end of §7.27
 (wp4 streaming + fusion ladder, teacher fusion K8, A@165k ring-buffer,
