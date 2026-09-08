@@ -19,9 +19,27 @@ Usage:
   python tools/build_dexfull_groups.py --groups dex-full/benchmark_groups.json \
       --out /projects/gcaddeo/inference/TRELLIS/dex-full-groups
 """
-import os, json, argparse, csv
+import os, sys, json, argparse, csv
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 LATENT = "vae_final_all_resume_2_0300000"
+
+
+def _write_gt_meta(job):
+    inst, cam, date, src_meta, dst = job
+    try:
+        from dexfull_calib import gt_pose_block
+        m = json.load(open(src_meta))
+        m["pose_export"] = m["pose"]
+        m["pose"] = gt_pose_block(SRC_ROOT, inst, cam, date)
+        with open(dst, "w") as f:
+            json.dump(m, f, indent=1)
+        return None
+    except Exception as e:
+        return f"{inst}: {e!r}"
+
+
+SRC_ROOT = "/projects/gcaddeo/inference/TRELLIS/dex-full"
 
 
 def link(src, dst):
@@ -36,8 +54,16 @@ def main():
     ap.add_argument("--groups", required=True, help="benchmark_groups.json (cams + groups)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--gt_metas", action="store_true",
+                    help="materialize the per-view metas with a GT pose block from the DexYCB "
+                         "calibration (tools/dexfull_calib.py) instead of symlinking the export metas "
+                         "(whose pose block has R=I, i.e. no inter-camera pose). Enables the meta-warp "
+                         "(GT-pose) path of the harnesses on real captures.")
+    ap.add_argument("--workers", type=int, default=8)
     args = ap.parse_args()
 
+    global SRC_ROOT
+    SRC_ROOT = args.src
     spec = json.load(open(args.groups))
     cams = spec["__meta__"]["cams"]
     groups = spec["groups"]
@@ -49,7 +75,7 @@ def main():
     for d in ("renders_cond", "data_pose_norm", lat_dst):
         os.makedirs(os.path.join(args.out, d) if not os.path.isabs(d) else d, exist_ok=True)
 
-    rows, n_lat, n_missing_render = [], 0, 0
+    rows, n_lat, n_missing_render, gt_jobs = [], 0, 0, []
     manifest = {"__meta__": {"src": args.src, "cams": cams, "latent": LATENT,
                              "note": "view v of a group instance == camera cams[v]; "
                                      "all 8 views are SIMULTANEOUS captures (DexYCB 8-cam rig)"},
@@ -74,7 +100,14 @@ def main():
             link(os.path.join(s_rc, "000_mask1.png"), os.path.join(rc, f"{v:03d}_mask_1.png"))
             link(os.path.join(s_rc, "000_mask2.png"), os.path.join(rc, f"{v:03d}_mask_2.png"))
             link(os.path.join(s_rc, "meta.json"), os.path.join(rc, f"{v:03d}_source_meta.json"))
-            link(os.path.join(s_dp, f"{I}_f000_meta.json"), os.path.join(dp, f"{G}_f{v:03d}_meta.json"))
+            meta_dst = os.path.join(dp, f"{G}_f{v:03d}_meta.json")
+            if args.gt_metas:
+                if os.path.islink(meta_dst):
+                    os.unlink(meta_dst)
+                if not os.path.exists(meta_dst):
+                    gt_jobs.append((I, cams[v], date, os.path.join(s_dp, f"{I}_f000_meta.json"), meta_dst))
+            else:
+                link(os.path.join(s_dp, f"{I}_f000_meta.json"), meta_dst)
             for part in ("object", "hand"):
                 link(os.path.join(s_dp, "sdfs", f"{I}_f000__{part}.npy"),
                      os.path.join(dp, "sdfs", f"{G}_f{v:03d}__{part}.npy"))
@@ -96,6 +129,13 @@ def main():
         rows.append({"sha256": G, "aesthetic_score": 10.0, "rendered": True, "voxelized": True,
                      f"ss_latent_{LATENT}": ok_lat, "cond_rendered": ok_render, "local path": ""})
         manifest["groups"][G] = {"key": k, "instances": insts}
+    if gt_jobs:
+        from multiprocessing import Pool
+        print(f"writing {len(gt_jobs)} GT-pose metas with {args.workers} workers ...")
+        with Pool(args.workers) as pool:
+            res = pool.map(_write_gt_meta, gt_jobs, chunksize=8)
+        bad = [r for r in res if r is not None]
+        print(f"GT metas written; {len(bad)} failures: {bad[:3]}")
     with open(os.path.join(args.out, "metadata.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
