@@ -1362,3 +1362,17 @@ plain model's stream_final == single (no prior channel) ✓. Deployed model
 UNCHANGED (frozen warm-P4: streaming is the deployment mode). A-chain
 STOPPED at ~174.5k (overnight overrun; free ~177k matchpoint ckpts exist if
 ever needed). MEASUREMENT PROGRAM NOW CLOSED except the dex attribution row.
+
+**Dex attribution SETTLED (jobs 695/696, read 2026-09-08): §7.25's "P4
+recipe improved the raw backbone" is CORRECTED — it was training time.**
+A@165k on dex (n=989): CD 0.0295/0.0100, NC 0.840/0.884, F@0.02 0.170 —
+ties the frozen wp4 on CD mean (0.0295), edges it on median (0.0100 vs
+0.0104) and F@0.02 (0.170 vs 0.164, recovering the teacher's fine-detail
+level). Consistent with §7.26's synthetic verdict: at matched compute the
+P4 recipe costs a little single-view quality everywhere (on dex the cost is
+~nil) and buys the streaming capability. Final real-capture table rows:
+old teacher / teacher-v2@52k / A@165k (best single-view student) / frozen
+wp4 (deployed, streaming). MEASUREMENT PROGRAM FULLY CLOSED — §7.26 was the
+last controlled comparison, this row the last attribution. (Possible reopen:
+dex-full multi-view copy in progress, user-driven — would add REAL-CAPTURE
+streaming rows, 8 frames/grasp, view_groups.json manifest present.)
